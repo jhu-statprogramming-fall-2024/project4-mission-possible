@@ -1,0 +1,443 @@
+---
+title: "data scraping"
+format: html
+---
+
+# connect R to AACT
+
+```{r}
+# install.packages("RPostgreSQL")
+library(RPostgreSQL)
+drv <- dbDriver('PostgreSQL')
+
+con <- dbConnect(drv, dbname="aact",host="aact-db.ctti-clinicaltrials.org", port=5432, user="missionpossible", password="project4")
+
+# example
+aact_sample <- dbGetQuery(con, "select distinct study_type from studies")
+```
+
+# explore the database
+
+## total number of trials
+
+```{r}
+# list all tables
+tables <- dbListTables(con)
+
+# total number of trials registered in Study table
+nrow(dbGetQuery(con, "select nct_id from studies"))
+
+# earliest start date of all trials
+dbGetQuery(con, "select min(start_date) from studies")
+
+# filter the trials starts after 2000.01.01and count number
+dbGetQuery(con, "select count(nct_id) from studies where start_date > '2000-01-01'")
+
+# find and save the nct_id of trials starts after 2000.01.01
+nct_id2000 <- dbGetQuery(con, "select nct_id from studies where start_date > '2000-01-01'")
+```
+
+we may want to include only the trials starts after 2000.01.01, a total of 504818 trials.
+
+### status of trials
+
+```{r}
+# summary of overall_status for trials after 2000.01.01
+dbGetQuery(con, "select overall_status, count(*) as n from studies where start_date > '2000-01-01' group by overall_status order by n desc")
+```
+
+Do we want to only include the trials that are completed?
+
+## start date of trials
+
+```{r}
+# is there any missing value in start_date in all trials?
+dbGetQuery(con, "select count(*) from studies where start_date is null")
+```
+
+A total of 5183 studies does not have start_date - we can exclude them by only using trials after 2000.01.01.
+
+```{r}
+# summary of start_date_type for trials after 2000.01.01 
+dbGetQuery(con, "select start_date_type, count(*) as n from studies where start_date > '2000-01-01' group by start_date_type order by n desc")
+
+# is there any missing value in start_date in filtered trials? - no
+dbGetQuery(con, "select count(*) from studies where nct_id in (select nct_id from studies where start_date > '2000-01-01') and start_date is null")
+
+# create a summary table of start_date_type for trials after 2000.01.01
+dbGetQuery(con, "select start_date_type, count(*) as n from studies where start_date > '2000-01-01' group by start_date_type order by n desc")
+
+# first five rows with start_date_type = NA for trials after 2000.01.01
+dbGetQuery(con, "select * from studies where start_date_type is null and start_date > '2000-01-01' limit 5")
+
+# summary table of overall_status for trials with start_date_type = NA and after 2000.01.01
+dbGetQuery(con, "select overall_status, count(*) as n from studies where start_date_type is null and start_date > '2000-01-01' group by overall_status order by n desc")
+```
+
+Not sure why some trials miss the start_date_type - but we can just use the start_date.
+
+## condition/disease that is being studied
+
+```{r}
+# first 3 rows from conditions
+dbGetQuery(con, "select * from conditions limit 3")
+
+# create a summary table that counts the number of every distinct condition for trials after 2000.01.01
+dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2000-01-01') group by name order by n desc")
+```
+
+There are a total of 115898 distinct conditions being studied in the trials after 2000.01.01, which is a large number and there is a great imbalance between the number of the trials for each condition. To better prepare for the visualizations and building prediction model, we may focus on the top 10 most popular conditions.
+
+```{r}
+# count the number of rows for each nct_id in conditions
+conditions <- dbGetQuery(con, "SELECT nct_id, COUNT(*) FROM conditions GROUP BY nct_id")
+```
+Notice that each trial might have multiple conditions. 
+
+
+```{r}
+# top 10 most popular conditions after 2000.01.01
+dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2000-01-01') group by name order by n desc limit 11")
+
+# count the total number of trials where condition is among the top 10 most popular conditions and after 2000.01.01
+dbGetQuery(con, "select count(distinct nct_id) from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')")
+```
+
+According to the database, "Healthy" refers to that the trial is conducted in the healthy population, though the intervention is targeted at different disease conditions. Therefore, it is removed. 
+
+Also, "Cancer" often refers to the trials conducted in cancer patients to test "supportive treatment", such as supportive care/psychological intervention. Therefore, it is not a replication of other conditions with specific cancer type, eg. "Breast Cancer".
+
+A total of 49813 trials remains after filtering the trials among top 10 conditions and after 2000.01.01.
+
+```{r}
+# does all phase 1 trial use healthy participants? - no 
+dbGetQuery(con, "select distinct phase from studies where nct_id in (select nct_id from conditions where name = 'Healthy')")
+
+# first 10 rows where condition is cancer 
+dbGetQuery(con, "select * from conditions where name = 'Cancer' limit 10")
+
+
+# check if one trial could have multiple conditions for trials after 2000.01.01 and among the top 10 condition - yes
+dbGetQuery(con, "select nct_id, count(*) from conditions where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by nct_id having count(*) > 1")
+```
+
+Notice that one trial could have multiple conditions - we can only use the condition that is in the top 10 conditions. 
+
+
+
+
+## trial phase
+
+```{r}
+# distinct phase from studies for trials after 2000.01.01
+dbGetQuery(con, "select distinct phase from studies where start_date > '2000-01-01'")
+
+# create summary table that counts the number of trials for each phase after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select phase, count(*) as n from studies where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by phase order by n desc")
+
+# proportion of trials with phase is missing for all trials after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select count(*) from studies where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) and (phase is null)")
+```
+
+Notice that "NA" means phase is not applicable - not all trials are for the purpose of drug development. Only NA means phase is missing (9722 trials).
+
+## enrollment
+
+```{r}
+# first 3 rows from studies with enrollment and enrollment_type
+dbGetQuery(con, "select enrollment, enrollment_type from studies limit 3")
+
+# distinct value for enrollment_type
+dbGetQuery(con, "select distinct enrollment_type from studies")
+
+# count the number of distinct enrollment_type for trials after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select enrollment_type, count(*) as n from studies where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by enrollment_type order by n desc")
+
+# summary table of overall_status grouped by enrollment_type for trials after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select enrollment_type, overall_status, count(*) as n from studies where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by enrollment_type, overall_status order by n desc")
+
+# first 5 trials wtih overall_status is completed and enrollment_type is estimated and after 2000.01.01 and among top 10 condition
+dbGetQuery(con, "select * from studies where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) and overall_status = 'COMPLETED' and enrollment_type = 'ESTIMATED' limit 5")
+```
+
+Some are actual enrollment and some are estimated enrollment. And not sure why some completed trials only have estimated enrollment.
+
+We may used whatever is available for the enrollment - just keep in mind that some are estimated sample size.
+
+## location
+
+```{r}
+# show the first 5 rows from countries table
+dbGetQuery(con, "select * from countries limit 5")
+
+# for the following, we need to filter the trials after 2000.01.01 and among the top 10 condition using information in studies table and use nct_id to match the corresponding trials in counteries table
+
+
+# summary table of name for trials after 2000.01.01 and among the top 10 condition and removed = FALSE
+dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) and removed = FALSE group by name order by n desc")
+```
+
+A total of 164 countries are involved in clinical trials after 2000.01.01 and among the top 10 condition. Still, we can limit our focus on top 10 or 20 countries with the most trials. Notice that one trial could have multiple locations.
+
+## intervention types
+
+```{r}
+# summary table of intervention_type for trials after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select intervention_type, count(*) as n from interventions where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by intervention_type order by n desc")
+
+
+
+# check if one trial could have multiple intervention types for trials after 2000.01.01 and among the top 10 condition - yes
+dbGetQuery(con, "select nct_id, count(*) from interventions where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) group by nct_id having count(*) > 1 limit 5")
+# show the intervention type for trial with nct_id NCT00000105
+dbGetQuery(con, "select * from interventions where nct_id = 'NCT00000105'")
+```
+
+# Data extraction
+```{r}
+# total number of trials after 2000.01.01 and among the top 10 condition
+dbGetQuery(con, "select count(distinct nct_id) from interventions where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01'))")
+
+# extract the nct_id of trials after 2000.01.01 and among the top 10 condition
+nct_id_top10 <- dbGetQuery(con, "select distinct nct_id from conditions where name in 
+                      ('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer') 
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')")
+```
+
+
+## Query the database for the trials data
+
+```{r}
+# Get the nct_id values of interest
+nct_id_values <- nct_id_top10$nct_id
+
+# Create placeholders for SQL query
+placeholders <- paste(shQuote(nct_id_values, type = "sh"), collapse = ", ")
+
+# Query the studies table
+studies_query <- paste0("
+  SELECT nct_id, start_date, overall_status, phase, enrollment, enrollment_type
+  FROM studies
+  WHERE nct_id IN (", placeholders, ")
+")
+studies <- dbGetQuery(con, studies_query)
+
+# Query the conditions table
+conditions_query <- paste0("
+  SELECT *
+  FROM conditions
+  WHERE nct_id IN (", placeholders, ")
+")
+conditions <- dbGetQuery(con, conditions_query)
+# remove all rows in conditions if column name is not in top ten conditions
+conditions_filtered <- conditions %>% 
+  filter(name %in% c('Healthy', 'Breast Cancer', 'Obesity', 
+                       'Stroke', 'Depression', 'Hypertension', 
+                       'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
+                       'Cancer'))
+# check if there is one nct_id have multiple conditions
+conditions_filtered %>% 
+  group_by(nct_id) %>% 
+  summarise(n = n()) %>% 
+  filter(n > 1)
+
+# Query the interventions table
+interventions_query <- paste0("
+  SELECT *
+  FROM interventions
+  WHERE nct_id IN (", placeholders, ")
+")
+interventions <- dbGetQuery(con, interventions_query)
+
+# Query the countries table
+countries_query <- paste0("
+  SELECT *
+  FROM countries
+  WHERE nct_id IN (", placeholders, ") AND removed = FALSE
+")
+countries <- dbGetQuery(con, countries_query)
+
+# save studies, conditions, interventions, countries as csv file
+write.csv(studies, "studies.csv", row.names = FALSE)
+write.csv(conditions_filtered, "conditions.csv", row.names = FALSE)
+write.csv(interventions, "interventions.csv", row.names = FALSE)
+write.csv(countries, "countries.csv", row.names = FALSE)
+```
+
+
+## Create a S3 class for trials data
+
+### Construct the trial object
+
+```{r}
+# # Constructor for the trials S3 class
+# create_trial <- function(nct_id, start_date, overall_status, phase, enrollment, 
+#                          enrollment_type, name, intervention_type, country, condition) {
+#   
+#   # Create the trial object as a list
+#   trial <- list(
+#     nct_id = nct_id,
+#     start_date = start_date,
+#     overall_status = overall_status,
+#     phase = phase,
+#     enrollment = enrollment,
+#     enrollment_type = enrollment_type,
+#     intervention_type = intervention_type,
+#     country = country,
+#     condition = condition
+#   )
+#   
+#   # Assign the S3 class
+#   class(trial) <- "trial"
+#   return(trial)
+# }
+# 
+# # Print method for the trial class
+# print.trial <- function(x) {
+#   cat("Clinical Trial Information:\n")
+#   cat("NCT ID:", x$nct_id, "\n")
+#   cat("Start Date:", x$start_date, "\n")
+#   cat("Overall Status:", x$overall_status, "\n")
+#   cat("Phase:", x$phase, "\n")
+#   cat("Enrollment:", x$enrollment, "\n")
+#   cat("Enrollment Type:", x$enrollment_type, "\n")
+#   cat("Intervention Type(s):", paste(x$intervention_type, collapse = ", "), "\n")
+#   cat("Country/Countries:", paste(x$country, collapse = ", "), "\n")
+#   cat("Condition(s):", paste(x$condition, collapse = ", "), "\n")
+# }
+# 
+# # Example usage
+# trial_example <- create_trial(
+#   nct_id = "NCT12345678",
+#   start_date = "2023-01-01",
+#   overall_status = "Recruiting",
+#   phase = "Phase 2",
+#   enrollment = 100,
+#   enrollment_type = "Anticipated",
+#   intervention_type = c("Drug", "Device"),
+#   country = c("USA", "Canada"),
+#   condition = c("Hypertension", "Cardiovascular Disease")
+# )
+# 
+# # Print the trial
+# print(trial_example)
+
+```
+
+
+### assign the actual values to the trials object
+
+```{r}
+# library(tidyverse)
+# # Function to create a trial object
+# create_trial <- function(nct_id, studies, conditions, interventions, countries) {
+#   study <- studies %>% filter(nct_id == !!nct_id)
+#   condition_names <- conditions %>% filter(nct_id == !!nct_id) %>% pull(name)
+#   intervention_types <- interventions %>% filter(nct_id == !!nct_id) %>% pull(intervention_type)
+#   country_names <- countries %>% filter(nct_id == !!nct_id) %>% pull(name)
+#   
+#   trial <- list(
+#     nct_id = nct_id,
+#     start_date = as.Date(study$start_date),
+#     overall_status = study$overall_status,
+#     phase = study$phase,
+#     enrollment = study$enrollment,
+#     enrollment_type = study$enrollment_type,
+#     intervention_type = intervention_types,
+#     country = country_names,
+#     condition = condition_names
+#   )
+#   
+#   class(trial) <- "trial"
+#   return(trial)
+# }
+# 
+# # Create trial objects for all nct_ids of interest
+# trials <- lapply(nct_id_values, function(id) {
+#   create_trial(
+#     nct_id = id,
+#     studies = studies,
+#     conditions = conditions,
+#     interventions = interventions,
+#     countries = countries
+#   )
+# })
+
+```
+
+
+
+
+
+
+
+
+

@@ -226,6 +226,16 @@ dbGetQuery(con, "select name, count(*) as n from countries where nct_id in
 
 A total of 164 countries are involved in clinical trials after 2000.01.01 and among the top 10 condition. Still, we can limit our focus on top 10 or 20 countries with the most trials. Notice that one trial could have multiple locations.
 
+```{r}
+# summary table of the top 15 most popular countries for trials between 2020.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE 
+dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Covid19', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 'Parkinson Disease')
+           and nct_id in (select nct_id from studies where start_date > '2000-01-01')) and removed = FALSE group by name order by n desc limit 15")
+```
+
+
 ## intervention types
 
 ```{r}
@@ -270,6 +280,17 @@ nct_id_top10 <- dbGetQuery(con, "select distinct nct_id from conditions where na
                        'Pain', 'Prostate Cancer', 'Coronary Artery Disease', 
                        'Cancer') 
            and nct_id in (select nct_id from studies where start_date > '2000-01-01')")
+
+# extract the nct_id of trials between 2020.01.01 and 2024.12.31 and among the top 10 condition, and no missing value in phase, and top 10 countries
+nct_id_top10 <- dbGetQuery(con, "select distinct nct_id from conditions where name in 
+                      ('Breast Cancer', 'Covid19', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 'Parkinson Disease')
+           and nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2025-01-01') 
+           and nct_id in (select nct_id from studies where phase is not null) 
+           and nct_id in (select nct_id from countries where name in 
+                      ('United States', 'Canada', 'Germany', 'France', 'United Kingdom', 
+                       'Italy', 'Spain', 'Australia', 'Netherlands', 'China') and removed = FALSE)")
+
 ```
 
 

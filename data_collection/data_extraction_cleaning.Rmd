@@ -1,0 +1,268 @@
+---
+title: "Untitled"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# connect R to AACT
+
+```{r}
+# install.packages("RPostgreSQL")
+library(RPostgreSQL)
+drv <- dbDriver('PostgreSQL')
+
+con <- dbConnect(drv, dbname="aact",host="aact-db.ctti-clinicaltrials.org", port=5432, user="missionpossible", password="project4")
+
+# example
+aact_sample <- dbGetQuery(con, "select distinct study_type from studies")
+```
+
+## find most popular disease in the past 10 years excluding COVID-19 and healthy
+
+```{r}
+# top 10 most popular conditions for trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31') group by name order by n desc limit 15")
+
+# extract the name of top 10 condition for trials start between 2020.01.01 and 2024.12.31
+top_conditions <- dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31') group by name order by n desc limit 15")
+
+# count the total number of trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select count(*) from studies where start_date > '2020-01-01' and start_date < '2024-12-31'")
+
+
+# count the total number of trials where condition is among the top 10 most popular conditions for trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select count(distinct nct_id) from conditions where name in 
+                      ('Breast Cancer', 'Covid19', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 'Parkinson Disease')
+           and nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31')")
+```
+
+Disease selected: ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 
+                       'Parkinson Disease', 'Prostate Cancer')
+
+
+
+
+## select countries
+```{r}
+# summary table of the top 15 most popular countries for trials between 2020.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE 
+dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 
+                       'Parkinson Disease', 'Prostate Cancer')
+           and nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31')) and removed = FALSE group by name order by n desc limit 15")
+
+# extract the name of top 15 countries for trials between 2020.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE
+top_countries <- dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 
+                       'Parkinson Disease', 'Prostate Cancer')
+           and nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31')) and removed = FALSE group by name order by n desc limit 15")
+```
+
+countries selected: ('United States', 'China', 'Turkey', 'France', 'Canada', 
+               'United Kingdom', 'Italy', 'Spain', 'Germany', 'Netherlands')
+
+
+# if we want data for last 10 years 
+
+## find most popular disease in the past 10 years excluding COVID-19 and healthy
+
+```{r}
+# top 10 most popular conditions for trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31') group by name order by n desc limit 15")
+
+# extract the name of top 10 condition for trials start between 2020.01.01 and 2024.12.31
+top_conditions <- dbGetQuery(con, "select name, count(*) as n from conditions where nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31') group by name order by n desc limit 15")
+
+# count the total number of trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select count(*) from studies where start_date > '2020-01-01' and start_date < '2024-12-31'")
+
+
+# count the total number of trials where condition is among the top 10 most popular conditions for trials start between 2020.01.01 and 2024.12.31
+dbGetQuery(con, "select count(distinct nct_id) from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+           and nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31')")
+```
+
+Disease selected: ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+
+## select countries
+```{r}
+# summary table of the top 15 most popular countries for trials between 2015.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE 
+dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+           and nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31')) and removed = FALSE group by name order by n desc limit 15")
+
+# extract the name of top 15 countries for trials between 2020.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE
+top_countries <- dbGetQuery(con, "select name, count(*) as n from countries where nct_id in 
+                      (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+           and nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31')) and removed = FALSE group by name order by n desc limit 15")
+
+# count the number of trials in the top 10 countries between 2015.01.01 and 2024.12.31 and among the top 10 condition and removed = FALSE
+dbGetQuery(con, "select count(distinct nct_id) from countries where name in 
+                      ('United States', 'China', 'France', 'Canada', 
+                       'United Kingdom', 'Turkey', 'Spain', 'Italy', 
+                       'Germany', 'Korea, Republic of')
+           and nct_id in (select nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+           and nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31')) and removed = FALSE")
+```
+
+countries selected ('United States', 'China', 'France', 'Canada', 
+               'United Kingdom', 'Turkey', 'Spain', 'Italy', 
+               'Germany', 'Korea, Republic of')
+
+
+
+
+
+
+
+# Extract data from database 
+
+## Extract the nct_id
+
+```{r}
+# # extract the nct_id of trials between 2020.01.01 and 2024.12.31 and among the top 10 condition, and no missing value in phase, and top 10 countries
+# nct_id_top10 <- dbGetQuery(con, "select distinct nct_id from conditions where name in 
+#                       ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+#                        'Anxiety', 'Cancer', 'Pain', 'Heart Failure', 
+#                        'Parkinson Disease', 'Prostate Cancer')
+#            and nct_id in (select nct_id from studies where start_date > '2020-01-01' and start_date < '2024-12-31') 
+#            and nct_id in (select nct_id from studies where phase is not null) 
+#            and nct_id in (select nct_id from countries where name in 
+#                       ('United States', 'Canada', 'Germany', 'France', 'United Kingdom', 
+#                        'Italy', 'Spain', 'Australia', 'Netherlands', 'China') and removed = FALSE)")
+
+# extract the nct_id of trials between 2015.01.01 and 2024.12.31 and among the top 10 condition, and no missing value in phase, and top 10 countries
+nct_id_top10 <- dbGetQuery(con, "select distinct nct_id from conditions where name in 
+                      ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension')
+           and nct_id in (select nct_id from studies where start_date > '2015-01-01' and start_date < '2024-12-31') 
+           and nct_id in (select nct_id from studies where phase is not null) 
+           and nct_id in (select nct_id from countries where name in 
+                      ('United States', 'China', 'France', 'Canada', 
+                       'United Kingdom', 'Turkey', 'Spain', 'Italy', 
+                       'Germany', 'Korea, Republic of') and removed = FALSE)")
+```
+
+## Query the database for the trials data
+
+```{r}
+library(tidyverse)
+
+# Get the nct_id values of interest
+nct_id_values <- nct_id_top10$nct_id
+
+# Create placeholders for SQL query
+placeholders <- paste(shQuote(nct_id_values, type = "sh"), collapse = ", ")
+
+# Query the studies table
+studies_query <- paste0("
+  SELECT nct_id, start_date, phase
+  FROM studies
+  WHERE nct_id IN (", placeholders, ")
+")
+studies <- dbGetQuery(con, studies_query)
+
+# Query the conditions table
+conditions_query <- paste0("
+  SELECT name, nct_id
+  FROM conditions
+  WHERE nct_id IN (", placeholders, ")
+")
+conditions <- dbGetQuery(con, conditions_query)
+# remove all rows in conditions if column name is not in top ten conditions
+conditions_filtered <- conditions %>% 
+  filter(name %in% c('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 
+                       'Pain', 'Anxiety', 'Cancer', 'Heart Failure', 
+                       'Prostate Cancer', 'Hypertension'))
+# # check if there is one nct_id have multiple conditions - yes 
+# conditions_filtered %>% 
+#   group_by(nct_id) %>% 
+#   summarise(n = n()) %>% 
+#   filter(n > 1)
+
+# Query the countries table
+countries_query <- paste0("
+  SELECT name, nct_id
+  FROM countries
+  WHERE nct_id IN (", placeholders, ") AND removed = FALSE
+")
+countries <- dbGetQuery(con, countries_query)
+# remove all countries that is not in the top ten countries
+countries_filtered <- countries %>% 
+  filter(name %in% c('United States', 'China', 'France', 'Canada', 
+               'United Kingdom', 'Turkey', 'Spain', 'Italy', 
+               'Germany', 'Korea, Republic of'))
+```
+
+## data cleaning
+
+### year
+```{r}
+# create a new column in studies named year, which extract the year information from start_date
+studies$year <- as.numeric(format(as.Date(studies$start_date), "%Y"))
+```
+
+### condition
+```{r}
+# Convert the dataset to the desired format
+conditions_spread <- conditions_filtered %>%
+  mutate(value = 1) %>%  # Create a placeholder column
+  pivot_wider(
+    names_from = name,   # Make columns from 'name' values
+    values_from = value, # Populate columns using the placeholder
+    values_fill = 0      # Fill missing combinations with 0
+  )
+```
+
+### country
+```{r}
+# Convert the dataset to the desired format
+countries_spread <- countries_filtered %>%
+  mutate(value = 1) %>%  # Create a placeholder column
+  pivot_wider(
+    names_from = name,   # Make columns from 'name' values
+    values_from = value, # Populate columns using the placeholder
+    values_fill = 0      # Fill missing combinations with 0
+  )
+```
+
+## combining dataset
+```{r}
+# Combine countries_spread and conditions_spread and studies based on nct_id
+data <- studies %>%
+  full_join(conditions_spread, by = "nct_id") %>%
+  full_join(countries_spread, by = "nct_id")
+
+# write csv file
+write.csv(data, "data.csv")
+```
+
+
+
+
+
+
+
+
+
+

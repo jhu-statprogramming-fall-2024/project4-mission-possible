@@ -11,7 +11,7 @@ Other useful website for AACT: [Query ClinicalTrials.gov through AACT](https://g
 In data_extraction_cleaning.Rmd
 - **Final data extraction and cleaning**
 - code to connect to AACT database, filter the top 10 countires and 10 diseases
-- the following filteration is used to generate the final data.csv
+- the following is used to filter the data in data.csv 
   - trials start_date after 2015.01.01 and before 2024.12.31
   - Top 10 most studies disease worldwide between 2015 and 2024 (exlcuing healthy, COVID-19)
     - ('Breast Cancer', 'Obesity', 'Stroke', 'Depression', 

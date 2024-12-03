@@ -8,6 +8,11 @@ This repository contains LASSO models for predicting various aspects of clinical
 
 The goal is to provide accurate predictions using historical data, with a focus on predicting trends up to 3 years into the future.
 
+## Programming paradigms
+
+- Object oriented programming paradigms
+- Machine learning paradigms
+
 ## 1. Files Included
 
 -   [**`final_models.RData`**](./final_models.RData): LASSO models for all three tasks.
@@ -28,14 +33,14 @@ The goal is to provide accurate predictions using historical data, with a focus 
 
 ## 4. Usage Example
 
-``` r
-# Load models and functions
-load('final_models.RData')
-predict_fn <- readRDS('predict_function.rds')
-time_info <- readRDS('time_info.rds')
+``` r 
+# Load models and functions load('final_models.RData') predict_fn \<- readRDS('predict_function.rds') time_info \<- readRDS('time_info.rds')
 
 # Generate future time points (36 months)
+
 future_points <- (time_info$last_month + 1):(time_info$last_month + 36)
 
 # Make predictions for any category
+
 predictions <- predict_fn(model, future_points)
+

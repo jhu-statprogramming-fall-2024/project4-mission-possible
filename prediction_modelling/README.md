@@ -1,6 +1,6 @@
 # Clinical Trial Prediction Models
 
-*Last updated: December 3, 2024*
+*Last updated: December 5, 2024*
 
 ## Overview
 
@@ -10,7 +10,7 @@ The goal is to provide accurate predictions using historical data, with a focus 
 
 ## Programming paradigms
 
-- Object oriented programming paradigms
+- Parallel computing paradigms
 - Machine learning paradigms
 
 ## 1. Files Included
@@ -22,9 +22,9 @@ The goal is to provide accurate predictions using historical data, with a focus 
 
 ## 2. Performance Metrics (RMSE)
 
--   **Country predictions**: 7.56
--   **Disease predictions**: 7.19
--   **Phase predictions**: 7.89
+-   **Country predictions**: 7.55
+-   **Disease predictions**: 7.21
+-   **Phase predictions**: 7.91
 
 ## 3. Data Timeframe
 
@@ -43,4 +43,3 @@ future_points <- (time_info$last_month + 1):(time_info$last_month + 36)
 # Make predictions for any category
 
 predictions <- predict_fn(model, future_points)
-

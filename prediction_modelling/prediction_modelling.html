@@ -356,13 +356,9 @@ Trials</h1>
 </div>
 
 
-<pre class="r"><code>library(tidyverse)
-library(caret)
-library(randomForest)
-library(glmnet)
-library(doParallel)
-library(lubridate)
-library(knitr)</code></pre>
+<pre class="r"><code>library(doParallel)
+library(tidyverse)
+library(glmnet)</code></pre>
 <div id="data-loading" class="section level2">
 <h2>0. Data Loading</h2>
 <pre class="r"><code>load_data &lt;- function(file_path = &quot;data.csv&quot;) {
@@ -380,897 +376,354 @@ data &lt;- load_data(&quot;../data_collection/data.csv&quot;)</code></pre>
 </div>
 <div id="data-preprocessing" class="section level2">
 <h2>1. Data Preprocessing</h2>
-<pre class="r"><code>preprocess_data &lt;- function(df) {
-  # Ensure input is a data frame
-  if (!is.data.frame(df)) {
-    stop(&quot;Input must be a data frame&quot;)
-  }
+<p>We separate data into three subsets, correspondingly prepared for
+three different tasks.</p>
+<pre class="r"><code>process_data &lt;- function(data) {
+  # 1. Country data in long format from wide
+  country_data &lt;- data %&gt;%
+    select(year, United.States, Canada, China, France, Germany,
+           United.Kingdom, Korea..Republic.of, Italy, Spain, Turkey) %&gt;%
+    pivot_longer(cols = -year, 
+                names_to = &quot;country&quot;, 
+                values_to = &quot;trial_count&quot;) %&gt;%
+    group_by(year, country) %&gt;%
+    summarise(trial_count = sum(trial_count), .groups = &quot;drop&quot;)
   
-  # First convert binary variables to numeric
-  disease_cols &lt;- c(&quot;Breast.Cancer&quot;, &quot;Prostate.Cancer&quot;, &quot;Stroke&quot;, &quot;Heart.Failure&quot;, 
-                   &quot;Pain&quot;, &quot;Obesity&quot;, &quot;Cancer&quot;, &quot;Depression&quot;, &quot;Hypertension&quot;, &quot;Anxiety&quot;)
+  # 2. Disease data in long format  
+  disease_data &lt;- data %&gt;%
+    select(year, Breast.Cancer, Prostate.Cancer, Stroke, Heart.Failure,
+           Pain, Obesity, Cancer, Depression, Hypertension, Anxiety) %&gt;%
+    pivot_longer(cols = -year, 
+                names_to = &quot;disease&quot;, 
+                values_to = &quot;trial_count&quot;) %&gt;%
+    group_by(year, disease) %&gt;%
+    summarise(trial_count = sum(trial_count), .groups = &quot;drop&quot;)
   
-  country_cols &lt;- c(&quot;United.States&quot;, &quot;Canada&quot;, &quot;China&quot;, &quot;France&quot;, &quot;Germany&quot;,
-                   &quot;United.Kingdom&quot;, &quot;Korea..Republic.of&quot;, &quot;Italy&quot;, &quot;Spain&quot;, &quot;Turkey&quot;)
+  # 3. Phase data (already in correct format)
+  phase_data &lt;- data %&gt;%
+    select(year, phase) %&gt;%
+     mutate(phase = if_else(is.na(phase), &quot;NA&quot;, as.character(phase))) %&gt;%  # Convert NA to &quot;NA&quot; string
+    group_by(year, phase) %&gt;%
+    summarise(trial_count = n(), .groups = &quot;drop&quot;)
   
-  # Convert to numeric explicitly with error checking
-  for (col in c(country_cols, disease_cols)) {
-    df[[col]] &lt;- as.numeric(as.character(df[[col]]))
-    if (any(is.na(df[[col]]))) {
-      cat(&quot;NAs found in column:&quot;, col, &quot;\n&quot;)
-    }
-  }
-  
-  # Convert temporal and categorical variables
-  df$start_date &lt;- as.Date(df$start_date)
-  df$month &lt;- month(df$start_date)
-  df$year &lt;- as.numeric(df$year)
-  
-  # Handle phase - convert NA to &quot;NA&quot; string first, then to factor
-  df$phase &lt;- ifelse(is.na(df$phase), &quot;NA&quot;, as.character(df$phase))
-  df$phase &lt;- factor(df$phase)
-  
-  # Convert binary columns to factors
-  df[c(disease_cols, country_cols)] &lt;- lapply(df[c(disease_cols, country_cols)], factor)
-  
-  # Print preprocessing info
-  cat(&quot;\nPreprocessing completed:\n&quot;)
-  cat(&quot;Dimensions:&quot;, dim(df), &quot;\n&quot;)
-  cat(&quot;Phase levels:&quot;, paste(levels(df$phase), collapse=&quot;, &quot;), &quot;\n&quot;)
-  
-  return(df)
+  return(list(
+    country = country_data,
+    disease = disease_data,
+    phase = phase_data
+  ))
 }
 
-processed_data &lt;- preprocess_data(data)</code></pre>
-<pre><code>## 
-## Preprocessing completed:
-## Dimensions: 12855 26 
-## Phase levels: EARLY_PHASE1, NA, PHASE1, PHASE1/PHASE2, PHASE2, PHASE2/PHASE3, PHASE3, PHASE4</code></pre>
+processed_data &lt;- process_data(data)</code></pre>
 </div>
 <div id="train-test-split" class="section level2">
 <h2>2. Train-Test Split</h2>
-<pre class="r"><code>split_data &lt;- function(df, split_ratio = 0.8) {
-  set.seed(123)
-  train_index &lt;- createDataPartition(y = 1:nrow(df), p = split_ratio, list = FALSE)
+<pre class="r"><code>split_data &lt;- function(data, train_ratio = 0.8) {
+  set.seed(123) 
   
+  if (&quot;country&quot; %in% names(data)) {
+    # Stratified split by country
+    train_idx &lt;- unlist(lapply(unique(data$country), function(c) {
+      idx &lt;- which(data$country == c)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if (&quot;disease&quot; %in% names(data)) {
+    # Stratified split by disease
+    train_idx &lt;- unlist(lapply(unique(data$disease), function(d) {
+      idx &lt;- which(data$disease == d)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if (&quot;phase&quot; %in% names(data)) {
+    # Stratified split by phase
+    train_idx &lt;- unlist(lapply(unique(data$phase), function(p) {
+      idx &lt;- which(data$phase == p)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  }
+  
+  # Create train and test sets
   list(
-    train = df[train_index, ],
-    test = df[-train_index, ]
+    train = data[train_idx, ],
+    test = data[-train_idx, ]
   )
 }
 
-splits &lt;- split_data(processed_data)
-train_data &lt;- splits$train
-test_data &lt;- splits$test</code></pre>
+# Split each dataset using the modified function
+splits &lt;- list(
+  country = split_data(processed_data$country),
+  disease = split_data(processed_data$disease),
+  phase = split_data(processed_data$phase)
+)</code></pre>
 </div>
 <div id="model-training" class="section level2">
 <h2>3. Model Training</h2>
-<p>Our goal is to generate 3-year forecasts for the number of trials by
-country, trial distribution by disease type, and trial phase patterns.
-Thus, we firstly setup a general function and then separately discuss
-three tasks as below.</p>
-<div id="data-preparation-functions" class="section level3">
-<h3>Data Preparation Functions</h3>
-<pre class="r"><code># Country data preparation
-prepare_count_data &lt;- function(data) {
-  country_cols &lt;- c(&quot;United.States&quot;, &quot;Canada&quot;, &quot;China&quot;, &quot;France&quot;, &quot;Germany&quot;,
-                   &quot;United.Kingdom&quot;, &quot;Korea..Republic.of&quot;, &quot;Italy&quot;, &quot;Spain&quot;, &quot;Turkey&quot;)
-  
-  count_data &lt;- lapply(country_cols, function(country) {
-    agg_data &lt;- aggregate(
-      as.numeric(as.character(data[[country]])),
-      by = list(
-        year = data$year,
-        month = data$month
-      ),
-      FUN = sum
-    )
-    names(agg_data)[3] &lt;- &quot;trial_count&quot;
-    agg_data$country &lt;- country
-    return(agg_data)
-  })
-  
-  return(do.call(rbind, count_data))
-}
-
-# Disease data preparation
-prepare_disease_data &lt;- function(data) {
-  disease_cols &lt;- c(&quot;Breast.Cancer&quot;, &quot;Prostate.Cancer&quot;, &quot;Stroke&quot;, &quot;Heart.Failure&quot;, 
-                   &quot;Pain&quot;, &quot;Obesity&quot;, &quot;Cancer&quot;, &quot;Depression&quot;, &quot;Hypertension&quot;, &quot;Anxiety&quot;)
-
-  disease_data &lt;- lapply(disease_cols, function(disease) {
-    agg_data &lt;- aggregate(
-      as.numeric(as.character(data[[disease]])),
-      by = list(
-        year = data$year,
-        month = data$month
-      ),
-      FUN = sum
-    )
-    names(agg_data)[3] &lt;- &quot;trial_count&quot;
-    agg_data$disease &lt;- disease
-    return(agg_data)
-  })
-  
-  return(do.call(rbind, disease_data))
-}
-
-# Phase data preparation
-prepare_phase_data &lt;- function(data) {
-  phase_data &lt;- aggregate(
-    rep(1, nrow(data)),
-    by = list(
-      year = data$year,
-      month = data$month,
-      phase = data$phase
-    ),
-    FUN = sum
-  )
-  names(phase_data)[4] &lt;- &quot;trial_count&quot;
-  
-  return(phase_data)
-}</code></pre>
-</div>
+<p>Our goal is to generate forecasts for the number of trials by year
+with country/disease type/trial phase patterns.</p>
 <div id="setup-parallel-computing" class="section level3">
 <h3>Setup Parallel Computing</h3>
-<pre class="r"><code>n_cores &lt;- detectCores() - 1  # Leave one core free
+<pre class="r"><code>n_cores &lt;- detectCores() - 1
 cl &lt;- makeCluster(n_cores)
-registerDoParallel(cl)
-
-# Set seed for reproducibility in parallel computing
-clusterSetRNGStream(cl, 123)</code></pre>
+registerDoParallel(cl)</code></pre>
 </div>
-<div id="shared-training-function" class="section level3">
-<h3>Shared Training Function</h3>
-<p>The models will be trained using cross-validation, and firstly a
-general training function should be setup since all three tasks use same
-structure:</p>
-<pre class="r"><code>train_models &lt;- function(target, prepared_data, category_name) {
-  set.seed(123)
-  # Filter data for target
-  subset_data &lt;- prepared_data[prepared_data[[category_name]] == target, ]
-  subset_data &lt;- subset_data[order(subset_data$year, subset_data$month), ]
+<div id="train-lasso-model" class="section level3">
+<h3>Train LASSO Model</h3>
+<p>We decided to use LASSO model in our context:</p>
+<ol style="list-style-type: decimal">
+<li><p>Prevents Overfitting: it uses lambda to control model complexity
+when we’re predicting future trends.</p></li>
+<li><p>Simple &amp; Interpretable: easy to explain predictions for
+dashboard development.</p></li>
+</ol>
+<pre class="r"><code>train_lasso &lt;- function(train_data) {
+  # Create model matrix
+  X_train &lt;- model.matrix(trial_count ~ ., data = train_data)
+  y_train &lt;- train_data$trial_count
   
-  model_data &lt;- data.frame(
-    trial_count = subset_data$trial_count,
-    time_index = 1:nrow(subset_data),
-    month_factor = factor(subset_data$month)
-  )
-  
-  # Train Random Forest with parallel processing
-  ctrl &lt;- trainControl(
-    method = &quot;cv&quot;,
-    number = 5,
-    verboseIter = FALSE,
-    allowParallel = TRUE
-  )
-  
-  rf_model &lt;- train(
-    trial_count ~ time_index + month_factor,
-    data = model_data,
-    method = &quot;rf&quot;,
-    trControl = ctrl,
-    ntree = 500
-  )
-  
-  # Train LASSO with parallel processing
-  x_train &lt;- model.matrix(~ time_index + month_factor - 1, data = model_data)
-  y_train &lt;- model_data$trial_count
-  
-  lasso_model &lt;- cv.glmnet(
-    x = x_train,
+  # Perform cross-validation to find optimal lambda
+  cv_fit &lt;- cv.glmnet(
+    x = X_train,
     y = y_train,
     alpha = 1,
     nfolds = 5,
     parallel = TRUE
   )
   
-  return(list(
-    rf_model = rf_model,
-    lasso_model = list(
-      model = lasso_model,
-      feature_names = colnames(x_train)
-    )
-  ))
-}</code></pre>
-</div>
-<div id="train-models" class="section level3">
-<h3>Train Models</h3>
-<pre class="r"><code># 1. Country Models
-train_count_data &lt;- prepare_count_data(train_data)
-country_models &lt;- foreach(country = unique(train_count_data$country),
-                         .packages = c(&quot;caret&quot;, &quot;glmnet&quot;, &quot;randomForest&quot;)) %dopar% {
-  train_models(country, train_count_data, &quot;country&quot;)
+  # Get best lambda and fit final model
+  best_lambda &lt;- cv_fit$lambda.min
+  final_model &lt;- glmnet(X_train, y_train, alpha = 1, lambda = best_lambda)
+  
+  list(
+    lasso_model = final_model,
+    cv_fit = cv_fit,
+    best_lambda = best_lambda
+  )
 }
-names(country_models) &lt;- unique(train_count_data$country)
 
-# 2. Disease Models
-train_disease_data &lt;- prepare_disease_data(train_data)
-disease_models &lt;- foreach(disease = unique(train_disease_data$disease),
-                         .packages = c(&quot;caret&quot;, &quot;glmnet&quot;, &quot;randomForest&quot;)) %dopar% {
-  train_models(disease, train_disease_data, &quot;disease&quot;)
-}
-names(disease_models) &lt;- unique(train_disease_data$disease)
+# Train models
+models &lt;- list(
+  country = train_lasso(splits$country$train),
+  disease = train_lasso(splits$disease$train),
+  phase = train_lasso(splits$phase$train)
+)
 
-# 3. Phase Models
-train_phase_data &lt;- prepare_phase_data(train_data)
-phase_models &lt;- foreach(phase = unique(train_phase_data$phase),
-                       .packages = c(&quot;caret&quot;, &quot;glmnet&quot;, &quot;randomForest&quot;)) %dopar% {
-  train_models(phase, train_phase_data, &quot;phase&quot;)
-}
-names(phase_models) &lt;- unique(train_phase_data$phase)
-
-# Stop Cluster
+# Stop parallel processing
 stopCluster(cl)</code></pre>
 </div>
 </div>
 <div id="model-evaluation" class="section level2">
 <h2>4. Model Evaluation</h2>
-<p>We evaluate model performance using error metrics (RMSE, MAE) on the
-teasting data</p>
-<pre class="r"><code>### Model Evaluation Functions
-calculate_metrics &lt;- function(actual, predicted) {
-  rmse &lt;- sqrt(mean((actual - predicted)^2))
-  mae &lt;- mean(abs(actual - predicted))
-  return(list(RMSE = rmse, MAE = mae))
-}
-
-evaluate_models &lt;- function(models, test_data_prepared, category_name) {
-  set.seed(123)
-  eval_results &lt;- data.frame()
+<p>We evaluate model performance using error metrics (RMSE, MAE,
+R-squared) on the testing data.</p>
+<pre class="r"><code>evaluate_lasso &lt;- function(model_list, test_data) {
+  # Extract model components
+  model &lt;- model_list$lasso_model
+  best_lambda &lt;- model_list$best_lambda
   
-  for(target in names(models)) {
-    # Get test data for current target
-    target_test &lt;- test_data_prepared[test_data_prepared[[category_name]] == target, ]
-    target_test &lt;- target_test[order(target_test$year, target_test$month), ]
-    
-    # Prepare test features
-    x_test &lt;- data.frame(
-      time_index = 1:nrow(target_test),
-      month_factor = factor(target_test$month, levels = 1:12)
-    )
-    
-    x_test_matrix &lt;- model.matrix(
-      ~ time_index + month_factor - 1, 
-      data = x_test,
-      contrasts.arg = list(month_factor = contrasts(factor(1:12)))
-    )
-    
-    # Get predictions - model structure same as from parallel training
-    rf_pred &lt;- predict(models[[target]]$rf_model, x_test)
-    lasso_pred &lt;- predict(models[[target]]$lasso_model$model, 
-                         newx = x_test_matrix, 
-                         s = &quot;lambda.min&quot;)
-    
-    # Calculate metrics
-    rf_metrics &lt;- calculate_metrics(target_test$trial_count, rf_pred)
-    lasso_metrics &lt;- calculate_metrics(target_test$trial_count, as.vector(lasso_pred))
-    
-    # Store results
-    eval_results &lt;- rbind(eval_results, data.frame(
-      Target = target,
-      Model = c(&quot;Random Forest&quot;, &quot;LASSO&quot;),
-      RMSE = c(rf_metrics$RMSE, lasso_metrics$RMSE),
-      MAE = c(rf_metrics$MAE, lasso_metrics$MAE)
-    ))
-  }
+  # Create test matrix in the same way as training
+  X_test &lt;- model.matrix(trial_count ~ ., data = test_data)
+  y_test &lt;- test_data$trial_count
   
-  return(eval_results)
+  # Make predictions
+  predictions &lt;- predict.glmnet(model, newx = X_test, s = best_lambda)
+  
+  
+  # Calculate metrics
+  mse &lt;- mean((y_test - predictions)^2)
+  rmse &lt;- sqrt(mse)
+  mae &lt;- mean(abs(y_test - predictions))
+  r2 &lt;- cor(y_test, predictions)^2
+  
+  list(
+    mse = mse,
+    rmse = rmse,
+    mae = mae,
+    r2 = r2
+  )
 }
-
-### Evaluate all three tasks
-# Prepare test data using same preparation functions
-test_count_data &lt;- prepare_count_data(test_data)
-test_disease_data &lt;- prepare_disease_data(test_data)
-test_phase_data &lt;- prepare_phase_data(test_data)
 
 # Evaluate models
-country_eval &lt;- evaluate_models(country_models, test_count_data, &quot;country&quot;)
-disease_eval &lt;- evaluate_models(disease_models, test_disease_data, &quot;disease&quot;)
-phase_eval &lt;- evaluate_models(phase_models, test_phase_data, &quot;phase&quot;)
+eval_results &lt;- list(
+  country = evaluate_lasso(models$country, splits$country$test),
+  disease = evaluate_lasso(models$disease, splits$disease$test),
+  phase = evaluate_lasso(models$phase, splits$phase$test)
+)
 
-# Print evaluations using kable
-cat(&quot;\n### Country Models Evaluation:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Country Models Evaluation:</code></pre>
-<pre class="r"><code>kable(country_eval)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Target</th>
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-<th align="right">MAE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">United.States</td>
-<td align="left">Random Forest</td>
-<td align="right">36.567478</td>
-<td align="right">36.119002</td>
-</tr>
-<tr class="even">
-<td align="left">United.States</td>
-<td align="left">LASSO</td>
-<td align="right">36.325779</td>
-<td align="right">36.108333</td>
-</tr>
-<tr class="odd">
-<td align="left">Canada</td>
-<td align="left">Random Forest</td>
-<td align="right">5.938208</td>
-<td align="right">5.736711</td>
-</tr>
-<tr class="even">
-<td align="left">Canada</td>
-<td align="left">LASSO</td>
-<td align="right">5.867851</td>
-<td align="right">5.686422</td>
-</tr>
-<tr class="odd">
-<td align="left">China</td>
-<td align="left">Random Forest</td>
-<td align="right">6.895736</td>
-<td align="right">6.006561</td>
-</tr>
-<tr class="even">
-<td align="left">China</td>
-<td align="left">LASSO</td>
-<td align="right">6.575908</td>
-<td align="right">5.983333</td>
-</tr>
-<tr class="odd">
-<td align="left">France</td>
-<td align="left">Random Forest</td>
-<td align="right">4.788823</td>
-<td align="right">4.484193</td>
-</tr>
-<tr class="even">
-<td align="left">France</td>
-<td align="left">LASSO</td>
-<td align="right">4.760459</td>
-<td align="right">4.491667</td>
-</tr>
-<tr class="odd">
-<td align="left">Germany</td>
-<td align="left">Random Forest</td>
-<td align="right">2.806184</td>
-<td align="right">2.663530</td>
-</tr>
-<tr class="even">
-<td align="left">Germany</td>
-<td align="left">LASSO</td>
-<td align="right">2.804052</td>
-<td align="right">2.673750</td>
-</tr>
-<tr class="odd">
-<td align="left">United.Kingdom</td>
-<td align="left">Random Forest</td>
-<td align="right">4.757256</td>
-<td align="right">4.615236</td>
-</tr>
-<tr class="even">
-<td align="left">United.Kingdom</td>
-<td align="left">LASSO</td>
-<td align="right">4.718910</td>
-<td align="right">4.608333</td>
-</tr>
-<tr class="odd">
-<td align="left">Korea..Republic.of</td>
-<td align="left">Random Forest</td>
-<td align="right">2.451569</td>
-<td align="right">2.227706</td>
-</tr>
-<tr class="even">
-<td align="left">Korea..Republic.of</td>
-<td align="left">LASSO</td>
-<td align="right">2.439703</td>
-<td align="right">2.235357</td>
-</tr>
-<tr class="odd">
-<td align="left">Italy</td>
-<td align="left">Random Forest</td>
-<td align="right">2.959663</td>
-<td align="right">2.746814</td>
-</tr>
-<tr class="even">
-<td align="left">Italy</td>
-<td align="left">LASSO</td>
-<td align="right">2.895938</td>
-<td align="right">2.739167</td>
-</tr>
-<tr class="odd">
-<td align="left">Spain</td>
-<td align="left">Random Forest</td>
-<td align="right">4.214558</td>
-<td align="right">3.816166</td>
-</tr>
-<tr class="even">
-<td align="left">Spain</td>
-<td align="left">LASSO</td>
-<td align="right">3.930352</td>
-<td align="right">3.758333</td>
-</tr>
-<tr class="odd">
-<td align="left">Turkey</td>
-<td align="left">Random Forest</td>
-<td align="right">5.843777</td>
-<td align="right">4.608714</td>
-</tr>
-<tr class="even">
-<td align="left">Turkey</td>
-<td align="left">LASSO</td>
-<td align="right">5.176816</td>
-<td align="right">4.425000</td>
-</tr>
-</tbody>
-</table>
-<pre class="r"><code>cat(&quot;\n### Disease Distribution Models Evaluation:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Disease Distribution Models Evaluation:</code></pre>
-<pre class="r"><code>kable(disease_eval)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Target</th>
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-<th align="right">MAE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">Breast.Cancer</td>
-<td align="left">Random Forest</td>
-<td align="right">11.886840</td>
-<td align="right">11.362700</td>
-</tr>
-<tr class="even">
-<td align="left">Breast.Cancer</td>
-<td align="left">LASSO</td>
-<td align="right">11.482573</td>
-<td align="right">11.283333</td>
-</tr>
-<tr class="odd">
-<td align="left">Prostate.Cancer</td>
-<td align="left">Random Forest</td>
-<td align="right">6.136013</td>
-<td align="right">5.957246</td>
-</tr>
-<tr class="even">
-<td align="left">Prostate.Cancer</td>
-<td align="left">LASSO</td>
-<td align="right">6.098730</td>
-<td align="right">5.950000</td>
-</tr>
-<tr class="odd">
-<td align="left">Stroke</td>
-<td align="left">Random Forest</td>
-<td align="right">6.944880</td>
-<td align="right">6.638977</td>
-</tr>
-<tr class="even">
-<td align="left">Stroke</td>
-<td align="left">LASSO</td>
-<td align="right">6.926849</td>
-<td align="right">6.616667</td>
-</tr>
-<tr class="odd">
-<td align="left">Heart.Failure</td>
-<td align="left">Random Forest</td>
-<td align="right">4.853583</td>
-<td align="right">4.672683</td>
-</tr>
-<tr class="even">
-<td align="left">Heart.Failure</td>
-<td align="left">LASSO</td>
-<td align="right">4.788441</td>
-<td align="right">4.650000</td>
-</tr>
-<tr class="odd">
-<td align="left">Pain</td>
-<td align="left">Random Forest</td>
-<td align="right">6.503922</td>
-<td align="right">6.275547</td>
-</tr>
-<tr class="even">
-<td align="left">Pain</td>
-<td align="left">LASSO</td>
-<td align="right">6.462057</td>
-<td align="right">6.266667</td>
-</tr>
-<tr class="odd">
-<td align="left">Obesity</td>
-<td align="left">Random Forest</td>
-<td align="right">10.440733</td>
-<td align="right">10.181218</td>
-</tr>
-<tr class="even">
-<td align="left">Obesity</td>
-<td align="left">LASSO</td>
-<td align="right">10.518170</td>
-<td align="right">10.158333</td>
-</tr>
-<tr class="odd">
-<td align="left">Cancer</td>
-<td align="left">Random Forest</td>
-<td align="right">5.799657</td>
-<td align="right">5.336053</td>
-</tr>
-<tr class="even">
-<td align="left">Cancer</td>
-<td align="left">LASSO</td>
-<td align="right">5.467403</td>
-<td align="right">5.291667</td>
-</tr>
-<tr class="odd">
-<td align="left">Depression</td>
-<td align="left">Random Forest</td>
-<td align="right">7.837988</td>
-<td align="right">7.632573</td>
-</tr>
-<tr class="even">
-<td align="left">Depression</td>
-<td align="left">LASSO</td>
-<td align="right">7.811053</td>
-<td align="right">7.633333</td>
-</tr>
-<tr class="odd">
-<td align="left">Hypertension</td>
-<td align="left">Random Forest</td>
-<td align="right">5.189508</td>
-<td align="right">4.946860</td>
-</tr>
-<tr class="even">
-<td align="left">Hypertension</td>
-<td align="left">LASSO</td>
-<td align="right">5.217126</td>
-<td align="right">4.946600</td>
-</tr>
-<tr class="odd">
-<td align="left">Anxiety</td>
-<td align="left">Random Forest</td>
-<td align="right">7.629972</td>
-<td align="right">6.920548</td>
-</tr>
-<tr class="even">
-<td align="left">Anxiety</td>
-<td align="left">LASSO</td>
-<td align="right">7.300885</td>
-<td align="right">6.916667</td>
-</tr>
-</tbody>
-</table>
-<pre class="r"><code>cat(&quot;\n### Phase Pattern Models Evaluation:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Phase Pattern Models Evaluation:</code></pre>
-<pre class="r"><code>kable(phase_eval)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Target</th>
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-<th align="right">MAE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">EARLY_PHASE1</td>
-<td align="left">Random Forest</td>
-<td align="right">1.0883573</td>
-<td align="right">0.9707588</td>
-</tr>
-<tr class="even">
-<td align="left">EARLY_PHASE1</td>
-<td align="left">LASSO</td>
-<td align="right">1.0355318</td>
-<td align="right">0.9602339</td>
-</tr>
-<tr class="odd">
-<td align="left">NA</td>
-<td align="left">Random Forest</td>
-<td align="right">45.9167280</td>
-<td align="right">44.7533492</td>
-</tr>
-<tr class="even">
-<td align="left">NA</td>
-<td align="left">LASSO</td>
-<td align="right">45.0908631</td>
-<td align="right">44.4250000</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE1</td>
-<td align="left">Random Forest</td>
-<td align="right">3.8511933</td>
-<td align="right">3.6821144</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE1</td>
-<td align="left">LASSO</td>
-<td align="right">3.9952699</td>
-<td align="right">3.8911266</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE1/PHASE2</td>
-<td align="left">Random Forest</td>
-<td align="right">1.3482945</td>
-<td align="right">1.2525392</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE1/PHASE2</td>
-<td align="left">LASSO</td>
-<td align="right">1.4069243</td>
-<td align="right">1.3197767</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE2</td>
-<td align="left">Random Forest</td>
-<td align="right">5.9456528</td>
-<td align="right">5.8158652</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE2</td>
-<td align="left">LASSO</td>
-<td align="right">6.0151322</td>
-<td align="right">5.8869048</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE2/PHASE3</td>
-<td align="left">Random Forest</td>
-<td align="right">0.5788934</td>
-<td align="right">0.5224217</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE2/PHASE3</td>
-<td align="left">LASSO</td>
-<td align="right">0.5195848</td>
-<td align="right">0.5193220</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE3</td>
-<td align="left">Random Forest</td>
-<td align="right">2.7026172</td>
-<td align="right">2.5519315</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE3</td>
-<td align="left">LASSO</td>
-<td align="right">2.7592492</td>
-<td align="right">2.6669165</td>
-</tr>
-<tr class="odd">
-<td align="left">PHASE4</td>
-<td align="left">Random Forest</td>
-<td align="right">2.5941007</td>
-<td align="right">2.4393505</td>
-</tr>
-<tr class="even">
-<td align="left">PHASE4</td>
-<td align="left">LASSO</td>
-<td align="right">2.4859195</td>
-<td align="right">2.3658929</td>
-</tr>
-</tbody>
-</table>
-<p>We then want to find the overall performance of RF and LASSO models
-in each task, since this simplifies our following dashboard
-development.</p>
-<pre class="r"><code># Determine best overall model for each task based on average RMSE
-determine_best_model &lt;- function(eval_results) {
-  # Calculate average performance for each model type
-  model_performance &lt;- aggregate(
-    RMSE ~ Model, 
-    data = eval_results, 
-    FUN = mean
+# Print results for each model
+for (type in names(eval_results)) {
+  cat(&quot;\nResults for&quot;, type, &quot;model:\n&quot;)
+  cat(&quot;Best lambda:&quot;, models[[type]]$best_lambda, &quot;\n&quot;)
+  cat(&quot;Test RMSE:&quot;, eval_results[[type]]$rmse, &quot;\n&quot;)
+  cat(&quot;Test MAE:&quot;, eval_results[[type]]$mae, &quot;\n&quot;)
+  cat(&quot;Test R-squared:&quot;, eval_results[[type]]$r2, &quot;\n&quot;)
+  
+  # Print non-zero coefficients
+  coefficients &lt;- coef(models[[type]]$lasso_model, s = models[[type]]$best_lambda)
+  coef_df &lt;- data.frame(
+    variable = rownames(coefficients)[coefficients@i + 1],
+    coefficient = coefficients@x,
+    row.names = NULL
   )
   
-  # Find the best model (lowest average RMSE)
-  best_model &lt;- model_performance$Model[which.min(model_performance$RMSE)]
-  avg_rmse &lt;- min(model_performance$RMSE)
-  
-  return(list(
-    Best_Model = best_model,
-    Average_RMSE = avg_rmse,
-    Model_Performance = model_performance
-  ))
-}
-
-# Print best models by task
-cat(&quot;\n### Best Overall Model by Task:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Best Overall Model by Task:</code></pre>
-<pre class="r"><code>cat(&quot;\n### Country Predictions:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Country Predictions:</code></pre>
-<pre class="r"><code>kable(determine_best_model(country_eval)$Model_Performance, format = &quot;markdown&quot;)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">LASSO</td>
-<td align="right">7.549577</td>
-</tr>
-<tr class="even">
-<td align="left">Random Forest</td>
-<td align="right">7.722325</td>
-</tr>
-</tbody>
-</table>
-<pre class="r"><code>cat(&quot;\n### Disease Distribution Predictions:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Disease Distribution Predictions:</code></pre>
-<pre class="r"><code>kable(determine_best_model(disease_eval)$Model_Performance, format = &quot;markdown&quot;)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">LASSO</td>
-<td align="right">7.207329</td>
-</tr>
-<tr class="even">
-<td align="left">Random Forest</td>
-<td align="right">7.322310</td>
-</tr>
-</tbody>
-</table>
-<pre class="r"><code>cat(&quot;\n### Phase Pattern Predictions:\n&quot;)</code></pre>
-<pre><code>## 
-## ### Phase Pattern Predictions:</code></pre>
-<pre class="r"><code>kable(determine_best_model(phase_eval)$Model_Performance, format = &quot;markdown&quot;)</code></pre>
-<table>
-<thead>
-<tr class="header">
-<th align="left">Model</th>
-<th align="right">RMSE</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td align="left">LASSO</td>
-<td align="right">7.913559</td>
-</tr>
-<tr class="even">
-<td align="left">Random Forest</td>
-<td align="right">8.003230</td>
-</tr>
-</tbody>
-</table>
-<div id="interpretation" class="section level3">
-<h3>Interpretation</h3>
-<p>Based on the evaluation results, <strong>LASSO consistently
-outperforms Random Forest across all three tasks</strong>:</p>
-<ol style="list-style-type: decimal">
-<li>Country Predictions:</li>
-</ol>
-<ul>
-<li>LASSO performs slightly better (RMSE: 7.55 vs 7.72)</li>
-<li>Suggests LASSO is more effective at capturing the country-specific
-patterns in trial counts</li>
-</ul>
-<ol start="2" style="list-style-type: decimal">
-<li>Disease Distribution:</li>
-</ol>
-<ul>
-<li>Both models perform similarly, but LASSO has a marginally lower RMSE
-(7.21 vs 7.32)</li>
-<li>Indicates disease trial patterns might be more linear in nature</li>
-</ul>
-<ol start="3" style="list-style-type: decimal">
-<li>Phase Patterns:</li>
-</ol>
-<ul>
-<li>LASSO again shows better performance (RMSE: 7.91 vs 8.00)</li>
-<li>The higher RMSE compared to other tasks suggests phase patterns
-might be more variable or harder to predict</li>
-</ul>
-<p>Overall, LASSO’s better performance across all tasks indicates that
-the relationships in our clinical trial data might be relatively linear,
-and LASSO’s ability to handle feature selection and prevent overfitting
-is beneficial for these predictions.</p>
-</div>
-</div>
-<div id="usable-for-dashboard-development" class="section level2">
-<h2>5. Usable for Dashboard Development</h2>
-<ol style="list-style-type: decimal">
-<li>Retrains models using complete dataset</li>
-</ol>
-<pre class="r"><code># Setup parallel computing
-n_cores &lt;- detectCores() - 1
-cl &lt;- makeCluster(n_cores)
-registerDoParallel(cl)
-
-# Retrain LASSO models using parallel processing
-retrain_final_model &lt;- function(data, category_name) {
-  if(category_name == &quot;country&quot;) {
-    prepared_data &lt;- prepare_count_data(data)
-  } else if(category_name == &quot;disease&quot;) {
-    prepared_data &lt;- prepare_disease_data(data)
-  } else {
-    prepared_data &lt;- prepare_phase_data(data)
-  }
-  
-  # Use foreach for parallel processing
-  final_models &lt;- foreach(target = unique(prepared_data[[category_name]]),
-                         .packages = c(&quot;glmnet&quot;)) %dopar% {
-    target_data &lt;- prepared_data[prepared_data[[category_name]] == target, ]
-    target_data &lt;- target_data[order(target_data$year, target_data$month), ]
-    
-    x_train &lt;- model.matrix(~ time_index + month_factor - 1, 
-                          data = data.frame(
-                            time_index = 1:nrow(target_data),
-                            month_factor = factor(target_data$month)
-                          ))
-    y_train &lt;- target_data$trial_count
-    
-    cv.glmnet(x_train, y_train, alpha = 1)
-  }
-  
-  names(final_models) &lt;- unique(prepared_data[[category_name]])
-  return(final_models)
-}
-
-# Train final models
-final_country_models &lt;- retrain_final_model(processed_data, &quot;country&quot;)
-final_disease_models &lt;- retrain_final_model(processed_data, &quot;disease&quot;)
-final_phase_models &lt;- retrain_final_model(processed_data, &quot;phase&quot;)
-
-# Stop cluster
-stopCluster(cl)</code></pre>
-<ol start="2" style="list-style-type: decimal">
-<li>Creates helper function for predictions</li>
-</ol>
-<pre class="r"><code>make_predictions &lt;- function(model, future_time_points) {
-  x_new &lt;- model.matrix(
-    ~ time_index + month_factor - 1,
-    data = data.frame(
-      time_index = future_time_points,
-      month_factor = factor(rep(1:12, length.out = length(future_time_points)))
-    )
-  )
-  predictions &lt;- predict(model, newx = x_new, s = &quot;lambda.min&quot;)
-  return(as.vector(predictions))
+  cat(&quot;\nSelected variables and coefficients:\n&quot;)
+  print(coef_df)
 }</code></pre>
+<pre><code>## 
+## Results for country model:
+## Best lambda: 1.701519 
+## Test RMSE: 28.78275 
+## Test MAE: 22.85173 
+## Test R-squared: 0.9784706 
+## 
+## Selected variables and coefficients:
+##                    variable  coefficient
+## 1               (Intercept) -7703.249746
+## 2                      year     3.859174
+## 3              countryChina    22.516631
+## 4            countryGermany   -31.343741
+## 5              countryItaly   -30.751700
+## 6 countryKorea..Republic.of   -35.730451
+## 7              countrySpain   -15.355673
+## 8      countryUnited.States   634.114315
+## 
+## Results for disease model:
+## Best lambda: 0.8525316 
+## Test RMSE: 23.69211 
+## Test MAE: 16.33043 
+## Test R-squared: 0.7520876 
+## 
+## Selected variables and coefficients:
+##                  variable  coefficient
+## 1             (Intercept) -9982.793913
+## 2                    year     5.009278
+## 3    diseaseBreast.Cancer    92.596267
+## 4           diseaseCancer   -26.535702
+## 5       diseaseDepression    14.725685
+## 6    diseaseHeart.Failure   -38.528006
+## 7     diseaseHypertension   -33.267333
+## 8          diseaseObesity    72.612967
+## 9             diseasePain    -6.266005
+## 10 diseaseProstate.Cancer    -9.635252
+## 11          diseaseStroke     3.744774
+## 
+## Results for phase model:
+## Best lambda: 0.3000231 
+## Test RMSE: 53.43009 
+## Test MAE: 24.50058 
+## Test R-squared: 0.985521 
+## 
+## Selected variables and coefficients:
+##             variable   coefficient
+## 1        (Intercept) -10859.422846
+## 2               year      5.389695
+## 3            phaseNA    840.093756
+## 4        phasePHASE1     57.437588
+## 5 phasePHASE1/PHASE2     10.856948
+## 6        phasePHASE2    105.095465
+## 7 phasePHASE2/PHASE3     -8.509223
+## 8        phasePHASE3     34.451970
+## 9        phasePHASE4     31.938539</code></pre>
+<div id="model-performance" class="section level3">
+<h3>Model Performance</h3>
+<ol style="list-style-type: decimal">
+<li>Country Model:</li>
+</ol>
+<ul>
+<li>Very high R-squared (0.978) indicates the model explains about 98%
+of the variance in trial counts by country</li>
+<li>RMSE of 28.78 and MAE of 22.85 suggest predictions typically deviate
+by about 23-29 trials from actual values</li>
+<li>This model has strong predictive power for country-level
+predictions</li>
+</ul>
+<ol start="2" style="list-style-type: decimal">
+<li>Disease Model:</li>
+</ol>
+<ul>
+<li>Moderate R-squared (0.752)</li>
+<li>RMSE of 23.69 and MAE of 16.33 indicate predictions are off by about
+16-24 trials on average</li>
+<li>Less accurate than the country model, suggesting disease trial
+counts may be harder to predict, but still reasonable</li>
+</ul>
 <ol start="3" style="list-style-type: decimal">
-<li>Prepares time and performance information</li>
+<li>Phase Model:</li>
 </ol>
-<pre class="r"><code># Save time information
-time_info &lt;- list(
-  last_date = max(processed_data$start_date),
-  last_year = max(processed_data$year),
-  last_month = max(processed_data$month[processed_data$year == max(processed_data$year)]),
-  rmse_values = list(
-    country = 7.549577,
-    disease = 7.207329,
-    phase = 7.913559
+<ul>
+<li>Highest R-squared (0.986)</li>
+<li>However, highest RMSE (53.43) and MAE (24.50) suggest larger
+variability</li>
+<li>This combination suggests phase trials have wider numerical ranges
+but follow predictable patterns</li>
+</ul>
+</div>
+</div>
+<div id="prediction-function" class="section level2">
+<h2>5. Prediction Function</h2>
+<p>We built independent models that don’t account for interactions
+between country/disease/phase.</p>
+<p>Each model makes predictions assuming other factors are not involved.
+Therefore, consider only the single prediction function.</p>
+<pre class="r"><code># Single prediction function for dashboard use
+predict_trials &lt;- function(year, type, category) {
+  # Input validation
+  if(!type %in% c(&quot;disease&quot;, &quot;country&quot;, &quot;phase&quot;)) {
+    stop(&quot;Type must be one of: disease, country, phase&quot;)
+  }
+  
+  # Create new data frame
+  new_data &lt;- data.frame(
+    year = year,
+    trial_count = NA
   )
-)</code></pre>
-<ol start="4" style="list-style-type: decimal">
-<li>Saves all necessary files</li>
-</ol>
-<pre class="r"><code># Save models
-save(final_country_models, final_disease_models, final_phase_models, 
-     file = &quot;../prediction_modelling/final_models.RData&quot;)
+  
+  # Add category based on type
+  if(type == &quot;disease&quot;) {
+    new_data$disease &lt;- category
+    train_data &lt;- splits$disease$train
+  } else if(type == &quot;country&quot;) {
+    new_data$country &lt;- category
+    train_data &lt;- splits$country$train
+  } else if(type == &quot;phase&quot;) {
+    new_data$phase &lt;- category
+    train_data &lt;- splits$phase$train
+  }
 
-# Save processed data for reference
-saveRDS(processed_data, &quot;../prediction_modelling/processed_data.rds&quot;)
+  # Create model matrix
+  combined_data &lt;- rbind(train_data, new_data)
+  X_new &lt;- model.matrix(trial_count ~ ., data = combined_data)
+  # Extract just the last row which corresponds to our new data
+  X_new &lt;- X_new[nrow(X_new), , drop = FALSE]
+  
+  # Make prediction using lasso_model from the models list
+  prediction &lt;- predict.glmnet(models[[type]]$lasso_model, 
+                             newx = X_new,
+                             s = models[[type]]$best_lambda)
+  
+  return(round(as.numeric(prediction)))
+}</code></pre>
+<pre class="r"><code># Example usage
 
-# Save prediction function
-saveRDS(make_predictions, &quot;../prediction_modelling/predict_function.rds&quot;)
-
-# Save time information
-saveRDS(time_info, &quot;../prediction_modelling/time_info.rds&quot;)</code></pre>
+# Disease prediction
+anxiety_pred &lt;- predict_trials(2025, &quot;disease&quot;, &quot;Anxiety&quot;)
+cat(&quot;Predicted trials for Anxiety:&quot;, anxiety_pred, &quot;\n&quot;)</code></pre>
+<pre><code>## Predicted trials for Anxiety: 115</code></pre>
+<pre class="r"><code># Country prediction
+us_pred &lt;- predict_trials(2025, &quot;country&quot;, &quot;United.States&quot;)
+cat(&quot;Predicted trials in United States:&quot;, us_pred, &quot;\n&quot;)</code></pre>
+<pre><code>## Predicted trials in United States: 707</code></pre>
+<pre class="r"><code># Phase prediction
+phase1_pred &lt;- predict_trials(2025, &quot;phase&quot;, &quot;PHASE1&quot;)
+cat(&quot;Predicted Phase 1 trials:&quot;, phase1_pred, &quot;\n&quot;)</code></pre>
+<pre><code>## Predicted Phase 1 trials: 81</code></pre>
+<div id="documentation" class="section level3">
+<h3>Documentation</h3>
+<pre class="r"><code># Save all essential components in one bundle
+save(list = c(
+  &quot;models&quot;,          # LASSO models
+  &quot;eval_results&quot;,    # Model performance metrics
+  &quot;predict_trials&quot;,  # Main prediction function
+  &quot;splits&quot;          # Data splits
+), file = &quot;../prediction_modelling/prediction_bundle.RData&quot;)</code></pre>
+</div>
 </div>
 
 

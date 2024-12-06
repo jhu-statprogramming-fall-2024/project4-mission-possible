@@ -5,13 +5,9 @@ output: html_document
 ---
 
 ```{r message=FALSE, warning=FALSE}
-library(tidyverse)
-library(caret)
-library(randomForest)
-library(glmnet)
 library(doParallel)
-library(lubridate)
-library(knitr)
+library(tidyverse)
+library(glmnet)
 ```
 
 ## 0. Data Loading
@@ -32,446 +28,298 @@ data <- load_data("../data_collection/data.csv")
 
 ## 1. Data Preprocessing
 
+We separate data into three subsets, correspondingly prepared for three different tasks.
+
 ```{r}
-preprocess_data <- function(df) {
-  # Ensure input is a data frame
-  if (!is.data.frame(df)) {
-    stop("Input must be a data frame")
-  }
+process_data <- function(data) {
+  # 1. Country data in long format from wide
+  country_data <- data %>%
+    select(year, United.States, Canada, China, France, Germany,
+           United.Kingdom, Korea..Republic.of, Italy, Spain, Turkey) %>%
+    pivot_longer(cols = -year, 
+                names_to = "country", 
+                values_to = "trial_count") %>%
+    group_by(year, country) %>%
+    summarise(trial_count = sum(trial_count), .groups = "drop")
   
-  # First convert binary variables to numeric
-  disease_cols <- c("Breast.Cancer", "Prostate.Cancer", "Stroke", "Heart.Failure", 
-                   "Pain", "Obesity", "Cancer", "Depression", "Hypertension", "Anxiety")
+  # 2. Disease data in long format  
+  disease_data <- data %>%
+    select(year, Breast.Cancer, Prostate.Cancer, Stroke, Heart.Failure,
+           Pain, Obesity, Cancer, Depression, Hypertension, Anxiety) %>%
+    pivot_longer(cols = -year, 
+                names_to = "disease", 
+                values_to = "trial_count") %>%
+    group_by(year, disease) %>%
+    summarise(trial_count = sum(trial_count), .groups = "drop")
   
-  country_cols <- c("United.States", "Canada", "China", "France", "Germany",
-                   "United.Kingdom", "Korea..Republic.of", "Italy", "Spain", "Turkey")
+  # 3. Phase data (already in correct format)
+  phase_data <- data %>%
+    select(year, phase) %>%
+     mutate(phase = if_else(is.na(phase), "NA", as.character(phase))) %>%  # Convert NA to "NA" string
+    group_by(year, phase) %>%
+    summarise(trial_count = n(), .groups = "drop")
   
-  # Convert to numeric explicitly with error checking
-  for (col in c(country_cols, disease_cols)) {
-    df[[col]] <- as.numeric(as.character(df[[col]]))
-    if (any(is.na(df[[col]]))) {
-      cat("NAs found in column:", col, "\n")
-    }
-  }
-  
-  # Convert temporal and categorical variables
-  df$start_date <- as.Date(df$start_date)
-  df$month <- month(df$start_date)
-  df$year <- as.numeric(df$year)
-  
-  # Handle phase - convert NA to "NA" string first, then to factor
-  df$phase <- ifelse(is.na(df$phase), "NA", as.character(df$phase))
-  df$phase <- factor(df$phase)
-  
-  # Convert binary columns to factors
-  df[c(disease_cols, country_cols)] <- lapply(df[c(disease_cols, country_cols)], factor)
-  
-  # Print preprocessing info
-  cat("\nPreprocessing completed:\n")
-  cat("Dimensions:", dim(df), "\n")
-  cat("Phase levels:", paste(levels(df$phase), collapse=", "), "\n")
-  
-  return(df)
+  return(list(
+    country = country_data,
+    disease = disease_data,
+    phase = phase_data
+  ))
 }
 
-processed_data <- preprocess_data(data)
+processed_data <- process_data(data)
 ```
 
 ## 2. Train-Test Split
 
 ```{r}
-split_data <- function(df, split_ratio = 0.8) {
-  set.seed(123)
-  train_index <- createDataPartition(y = 1:nrow(df), p = split_ratio, list = FALSE)
+split_data <- function(data, train_ratio = 0.8) {
+  set.seed(123) 
   
+  if ("country" %in% names(data)) {
+    # Stratified split by country
+    train_idx <- unlist(lapply(unique(data$country), function(c) {
+      idx <- which(data$country == c)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if ("disease" %in% names(data)) {
+    # Stratified split by disease
+    train_idx <- unlist(lapply(unique(data$disease), function(d) {
+      idx <- which(data$disease == d)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if ("phase" %in% names(data)) {
+    # Stratified split by phase
+    train_idx <- unlist(lapply(unique(data$phase), function(p) {
+      idx <- which(data$phase == p)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  }
+  
+  # Create train and test sets
   list(
-    train = df[train_index, ],
-    test = df[-train_index, ]
+    train = data[train_idx, ],
+    test = data[-train_idx, ]
   )
 }
 
-splits <- split_data(processed_data)
-train_data <- splits$train
-test_data <- splits$test
+# Split each dataset using the modified function
+splits <- list(
+  country = split_data(processed_data$country),
+  disease = split_data(processed_data$disease),
+  phase = split_data(processed_data$phase)
+)
 ```
 
 ## 3. Model Training
 
-Our goal is to generate 3-year forecasts for the number of trials by country, trial distribution by disease type, and trial phase patterns. Thus, we firstly setup a general function and then separately discuss three tasks as below.
-
-### Data Preparation Functions
-```{r}
-# Country data preparation
-prepare_count_data <- function(data) {
-  country_cols <- c("United.States", "Canada", "China", "France", "Germany",
-                   "United.Kingdom", "Korea..Republic.of", "Italy", "Spain", "Turkey")
-  
-  count_data <- lapply(country_cols, function(country) {
-    agg_data <- aggregate(
-      as.numeric(as.character(data[[country]])),
-      by = list(
-        year = data$year,
-        month = data$month
-      ),
-      FUN = sum
-    )
-    names(agg_data)[3] <- "trial_count"
-    agg_data$country <- country
-    return(agg_data)
-  })
-  
-  return(do.call(rbind, count_data))
-}
-
-# Disease data preparation
-prepare_disease_data <- function(data) {
-  disease_cols <- c("Breast.Cancer", "Prostate.Cancer", "Stroke", "Heart.Failure", 
-                   "Pain", "Obesity", "Cancer", "Depression", "Hypertension", "Anxiety")
-
-  disease_data <- lapply(disease_cols, function(disease) {
-    agg_data <- aggregate(
-      as.numeric(as.character(data[[disease]])),
-      by = list(
-        year = data$year,
-        month = data$month
-      ),
-      FUN = sum
-    )
-    names(agg_data)[3] <- "trial_count"
-    agg_data$disease <- disease
-    return(agg_data)
-  })
-  
-  return(do.call(rbind, disease_data))
-}
-
-# Phase data preparation
-prepare_phase_data <- function(data) {
-  phase_data <- aggregate(
-    rep(1, nrow(data)),
-    by = list(
-      year = data$year,
-      month = data$month,
-      phase = data$phase
-    ),
-    FUN = sum
-  )
-  names(phase_data)[4] <- "trial_count"
-  
-  return(phase_data)
-}
-```
+Our goal is to generate forecasts for the number of trials by year with country/disease type/trial phase patterns. 
 
 ### Setup Parallel Computing
 ```{r}
-n_cores <- detectCores() - 1  # Leave one core free
+n_cores <- detectCores() - 1
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
-
-# Set seed for reproducibility in parallel computing
-clusterSetRNGStream(cl, 123)
 ```
 
-### Shared Training Function 
-The models will be trained using cross-validation, and firstly a general training function should be setup since all three tasks use same structure:
+### Train LASSO Model
+
+We decided to use LASSO model in our context:
+
+1. Prevents Overfitting: it uses lambda to control model complexity when we're predicting future trends.
+
+2. Simple & Interpretable: easy to explain predictions for dashboard development.
+
 ```{r}
-train_models <- function(target, prepared_data, category_name) {
-  set.seed(123)
-  # Filter data for target
-  subset_data <- prepared_data[prepared_data[[category_name]] == target, ]
-  subset_data <- subset_data[order(subset_data$year, subset_data$month), ]
+train_lasso <- function(train_data) {
+  # Create model matrix
+  X_train <- model.matrix(trial_count ~ ., data = train_data)
+  y_train <- train_data$trial_count
   
-  model_data <- data.frame(
-    trial_count = subset_data$trial_count,
-    time_index = 1:nrow(subset_data),
-    month_factor = factor(subset_data$month)
-  )
-  
-  # Train Random Forest with parallel processing
-  ctrl <- trainControl(
-    method = "cv",
-    number = 5,
-    verboseIter = FALSE,
-    allowParallel = TRUE
-  )
-  
-  rf_model <- train(
-    trial_count ~ time_index + month_factor,
-    data = model_data,
-    method = "rf",
-    trControl = ctrl,
-    ntree = 500
-  )
-  
-  # Train LASSO with parallel processing
-  x_train <- model.matrix(~ time_index + month_factor - 1, data = model_data)
-  y_train <- model_data$trial_count
-  
-  lasso_model <- cv.glmnet(
-    x = x_train,
+  # Perform cross-validation to find optimal lambda
+  cv_fit <- cv.glmnet(
+    x = X_train,
     y = y_train,
     alpha = 1,
     nfolds = 5,
     parallel = TRUE
   )
   
-  return(list(
-    rf_model = rf_model,
-    lasso_model = list(
-      model = lasso_model,
-      feature_names = colnames(x_train)
-    )
-  ))
+  # Get best lambda and fit final model
+  best_lambda <- cv_fit$lambda.min
+  final_model <- glmnet(X_train, y_train, alpha = 1, lambda = best_lambda)
+  
+  list(
+    lasso_model = final_model,
+    cv_fit = cv_fit,
+    best_lambda = best_lambda
+  )
 }
-```
 
-### Train Models
-```{r}
-# 1. Country Models
-train_count_data <- prepare_count_data(train_data)
-country_models <- foreach(country = unique(train_count_data$country),
-                         .packages = c("caret", "glmnet", "randomForest")) %dopar% {
-  train_models(country, train_count_data, "country")
-}
-names(country_models) <- unique(train_count_data$country)
+# Train models
+models <- list(
+  country = train_lasso(splits$country$train),
+  disease = train_lasso(splits$disease$train),
+  phase = train_lasso(splits$phase$train)
+)
 
-# 2. Disease Models
-train_disease_data <- prepare_disease_data(train_data)
-disease_models <- foreach(disease = unique(train_disease_data$disease),
-                         .packages = c("caret", "glmnet", "randomForest")) %dopar% {
-  train_models(disease, train_disease_data, "disease")
-}
-names(disease_models) <- unique(train_disease_data$disease)
-
-# 3. Phase Models
-train_phase_data <- prepare_phase_data(train_data)
-phase_models <- foreach(phase = unique(train_phase_data$phase),
-                       .packages = c("caret", "glmnet", "randomForest")) %dopar% {
-  train_models(phase, train_phase_data, "phase")
-}
-names(phase_models) <- unique(train_phase_data$phase)
-
-# Stop Cluster
+# Stop parallel processing
 stopCluster(cl)
 ```
 
+## 4. Model Evaluation 
 
-## 4. Model Evaluation
-We evaluate model performance using error metrics (RMSE, MAE) on the teasting data
+We evaluate model performance using error metrics (RMSE, MAE, R-squared) on the testing data.
+
 ```{r}
-### Model Evaluation Functions
-calculate_metrics <- function(actual, predicted) {
-  rmse <- sqrt(mean((actual - predicted)^2))
-  mae <- mean(abs(actual - predicted))
-  return(list(RMSE = rmse, MAE = mae))
-}
-
-evaluate_models <- function(models, test_data_prepared, category_name) {
-  set.seed(123)
-  eval_results <- data.frame()
+evaluate_lasso <- function(model_list, test_data) {
+  # Extract model components
+  model <- model_list$lasso_model
+  best_lambda <- model_list$best_lambda
   
-  for(target in names(models)) {
-    # Get test data for current target
-    target_test <- test_data_prepared[test_data_prepared[[category_name]] == target, ]
-    target_test <- target_test[order(target_test$year, target_test$month), ]
-    
-    # Prepare test features
-    x_test <- data.frame(
-      time_index = 1:nrow(target_test),
-      month_factor = factor(target_test$month, levels = 1:12)
-    )
-    
-    x_test_matrix <- model.matrix(
-      ~ time_index + month_factor - 1, 
-      data = x_test,
-      contrasts.arg = list(month_factor = contrasts(factor(1:12)))
-    )
-    
-    # Get predictions - model structure same as from parallel training
-    rf_pred <- predict(models[[target]]$rf_model, x_test)
-    lasso_pred <- predict(models[[target]]$lasso_model$model, 
-                         newx = x_test_matrix, 
-                         s = "lambda.min")
-    
-    # Calculate metrics
-    rf_metrics <- calculate_metrics(target_test$trial_count, rf_pred)
-    lasso_metrics <- calculate_metrics(target_test$trial_count, as.vector(lasso_pred))
-    
-    # Store results
-    eval_results <- rbind(eval_results, data.frame(
-      Target = target,
-      Model = c("Random Forest", "LASSO"),
-      RMSE = c(rf_metrics$RMSE, lasso_metrics$RMSE),
-      MAE = c(rf_metrics$MAE, lasso_metrics$MAE)
-    ))
-  }
+  # Create test matrix in the same way as training
+  X_test <- model.matrix(trial_count ~ ., data = test_data)
+  y_test <- test_data$trial_count
   
-  return(eval_results)
+  # Make predictions
+  predictions <- predict.glmnet(model, newx = X_test, s = best_lambda)
+  
+  
+  # Calculate metrics
+  mse <- mean((y_test - predictions)^2)
+  rmse <- sqrt(mse)
+  mae <- mean(abs(y_test - predictions))
+  r2 <- cor(y_test, predictions)^2
+  
+  list(
+    mse = mse,
+    rmse = rmse,
+    mae = mae,
+    r2 = r2
+  )
 }
-
-### Evaluate all three tasks
-# Prepare test data using same preparation functions
-test_count_data <- prepare_count_data(test_data)
-test_disease_data <- prepare_disease_data(test_data)
-test_phase_data <- prepare_phase_data(test_data)
 
 # Evaluate models
-country_eval <- evaluate_models(country_models, test_count_data, "country")
-disease_eval <- evaluate_models(disease_models, test_disease_data, "disease")
-phase_eval <- evaluate_models(phase_models, test_phase_data, "phase")
-
-# Print evaluations using kable
-cat("\n### Country Models Evaluation:\n")
-kable(country_eval)
-cat("\n### Disease Distribution Models Evaluation:\n")
-kable(disease_eval)
-cat("\n### Phase Pattern Models Evaluation:\n")
-kable(phase_eval)
-```
-We then want to find the overall performance of RF and LASSO models in each task, since this simplifies our following dashboard development.
-
-```{r}
-# Determine best overall model for each task based on average RMSE
-determine_best_model <- function(eval_results) {
-  # Calculate average performance for each model type
-  model_performance <- aggregate(
-    RMSE ~ Model, 
-    data = eval_results, 
-    FUN = mean
-  )
-  
-  # Find the best model (lowest average RMSE)
-  best_model <- model_performance$Model[which.min(model_performance$RMSE)]
-  avg_rmse <- min(model_performance$RMSE)
-  
-  return(list(
-    Best_Model = best_model,
-    Average_RMSE = avg_rmse,
-    Model_Performance = model_performance
-  ))
-}
-
-# Print best models by task
-cat("\n### Best Overall Model by Task:\n")
-cat("\n### Country Predictions:\n")
-kable(determine_best_model(country_eval)$Model_Performance, format = "markdown")
-cat("\n### Disease Distribution Predictions:\n")
-kable(determine_best_model(disease_eval)$Model_Performance, format = "markdown")
-cat("\n### Phase Pattern Predictions:\n")
-kable(determine_best_model(phase_eval)$Model_Performance, format = "markdown")
-```
-
-### Interpretation
-
-Based on the evaluation results, **LASSO consistently outperforms Random Forest across all three tasks**:
-
-1. Country Predictions:
-- LASSO performs slightly better (RMSE: 7.55 vs 7.72)
-- Suggests LASSO is more effective at capturing the country-specific patterns in trial counts
-
-2. Disease Distribution:
-- Both models perform similarly, but LASSO has a marginally lower RMSE (7.21 vs 7.32)
-- Indicates disease trial patterns might be more linear in nature
-
-3. Phase Patterns:
-- LASSO again shows better performance (RMSE: 7.91 vs 8.00)
-- The higher RMSE compared to other tasks suggests phase patterns might be more variable or harder to predict
-
-Overall, LASSO's better performance across all tasks indicates that the relationships in our clinical trial data might be relatively linear, and LASSO's ability to handle feature selection and prevent overfitting is beneficial for these predictions.
-
-
-## 5. Usable for Dashboard Development
-
-1. Retrains models using complete dataset
-```{r}
-# Setup parallel computing
-n_cores <- detectCores() - 1
-cl <- makeCluster(n_cores)
-registerDoParallel(cl)
-
-# Retrain LASSO models using parallel processing
-retrain_final_model <- function(data, category_name) {
-  if(category_name == "country") {
-    prepared_data <- prepare_count_data(data)
-  } else if(category_name == "disease") {
-    prepared_data <- prepare_disease_data(data)
-  } else {
-    prepared_data <- prepare_phase_data(data)
-  }
-  
-  # Use foreach for parallel processing
-  final_models <- foreach(target = unique(prepared_data[[category_name]]),
-                         .packages = c("glmnet")) %dopar% {
-    target_data <- prepared_data[prepared_data[[category_name]] == target, ]
-    target_data <- target_data[order(target_data$year, target_data$month), ]
-    
-    x_train <- model.matrix(~ time_index + month_factor - 1, 
-                          data = data.frame(
-                            time_index = 1:nrow(target_data),
-                            month_factor = factor(target_data$month)
-                          ))
-    y_train <- target_data$trial_count
-    
-    cv.glmnet(x_train, y_train, alpha = 1)
-  }
-  
-  names(final_models) <- unique(prepared_data[[category_name]])
-  return(final_models)
-}
-
-# Train final models
-final_country_models <- retrain_final_model(processed_data, "country")
-final_disease_models <- retrain_final_model(processed_data, "disease")
-final_phase_models <- retrain_final_model(processed_data, "phase")
-
-# Stop cluster
-stopCluster(cl)
-```
-
-2. Creates helper function for predictions
-```{r}
-make_predictions <- function(model, future_time_points) {
-  x_new <- model.matrix(
-    ~ time_index + month_factor - 1,
-    data = data.frame(
-      time_index = future_time_points,
-      month_factor = factor(rep(1:12, length.out = length(future_time_points)))
-    )
-  )
-  predictions <- predict(model, newx = x_new, s = "lambda.min")
-  return(as.vector(predictions))
-}
-```
-
-3. Prepares time and performance information
-```{r}
-# Save time information
-time_info <- list(
-  last_date = max(processed_data$start_date),
-  last_year = max(processed_data$year),
-  last_month = max(processed_data$month[processed_data$year == max(processed_data$year)]),
-  rmse_values = list(
-    country = 7.549577,
-    disease = 7.207329,
-    phase = 7.913559
-  )
+eval_results <- list(
+  country = evaluate_lasso(models$country, splits$country$test),
+  disease = evaluate_lasso(models$disease, splits$disease$test),
+  phase = evaluate_lasso(models$phase, splits$phase$test)
 )
+
+# Print results for each model
+for (type in names(eval_results)) {
+  cat("\nResults for", type, "model:\n")
+  cat("Best lambda:", models[[type]]$best_lambda, "\n")
+  cat("Test RMSE:", eval_results[[type]]$rmse, "\n")
+  cat("Test MAE:", eval_results[[type]]$mae, "\n")
+  cat("Test R-squared:", eval_results[[type]]$r2, "\n")
+  
+  # Print non-zero coefficients
+  coefficients <- coef(models[[type]]$lasso_model, s = models[[type]]$best_lambda)
+  coef_df <- data.frame(
+    variable = rownames(coefficients)[coefficients@i + 1],
+    coefficient = coefficients@x,
+    row.names = NULL
+  )
+  
+  cat("\nSelected variables and coefficients:\n")
+  print(coef_df)
+}
 ```
 
-4. Saves all necessary files
+### Model Performance
+
+1. Country Model:
+
+- Very high R-squared (0.978) indicates the model explains about 98% of the variance in trial counts by country
+- RMSE of 28.78 and MAE of 22.85 suggest predictions typically deviate by about 23-29 trials from actual values
+- This model has strong predictive power for country-level predictions
+
+2. Disease Model:
+
+- Moderate R-squared (0.752) 
+- RMSE of 23.69 and MAE of 16.33 indicate predictions are off by about 16-24 trials on average
+- Less accurate than the country model, suggesting disease trial counts may be harder to predict, but still reasonable
+
+3. Phase Model:
+
+- Highest R-squared (0.986) 
+- However, highest RMSE (53.43) and MAE (24.50) suggest larger variability
+- This combination suggests phase trials have wider numerical ranges but follow predictable patterns
+
+## 5. Prediction Function
+
+We built independent models that don't account for interactions between country/disease/phase. 
+
+Each model makes predictions assuming other factors are not involved. Therefore, consider only the single prediction function.
+
 ```{r}
-# Save models
-save(final_country_models, final_disease_models, final_phase_models, 
-     file = "../prediction_modelling/final_models.RData")
+# Single prediction function for dashboard use
+predict_trials <- function(year, type, category) {
+  # Input validation
+  if(!type %in% c("disease", "country", "phase")) {
+    stop("Type must be one of: disease, country, phase")
+  }
+  
+  # Create new data frame
+  new_data <- data.frame(
+    year = year,
+    trial_count = NA
+  )
+  
+  # Add category based on type
+  if(type == "disease") {
+    new_data$disease <- category
+    train_data <- splits$disease$train
+  } else if(type == "country") {
+    new_data$country <- category
+    train_data <- splits$country$train
+  } else if(type == "phase") {
+    new_data$phase <- category
+    train_data <- splits$phase$train
+  }
 
-# Save processed data for reference
-saveRDS(processed_data, "../prediction_modelling/processed_data.rds")
-
-# Save prediction function
-saveRDS(make_predictions, "../prediction_modelling/predict_function.rds")
-
-# Save time information
-saveRDS(time_info, "../prediction_modelling/time_info.rds")
+  # Create model matrix
+  combined_data <- rbind(train_data, new_data)
+  X_new <- model.matrix(trial_count ~ ., data = combined_data)
+  # Extract just the last row which corresponds to our new data
+  X_new <- X_new[nrow(X_new), , drop = FALSE]
+  
+  # Make prediction using lasso_model from the models list
+  prediction <- predict.glmnet(models[[type]]$lasso_model, 
+                             newx = X_new,
+                             s = models[[type]]$best_lambda)
+  
+  return(round(as.numeric(prediction)))
+}
 ```
+
+```{r}
+# Example usage
+
+# Disease prediction
+anxiety_pred <- predict_trials(2025, "disease", "Anxiety")
+cat("Predicted trials for Anxiety:", anxiety_pred, "\n")
+
+# Country prediction
+us_pred <- predict_trials(2025, "country", "United.States")
+cat("Predicted trials in United States:", us_pred, "\n")
+
+# Phase prediction
+phase1_pred <- predict_trials(2025, "phase", "PHASE1")
+cat("Predicted Phase 1 trials:", phase1_pred, "\n")
+```
+### Documentation
+
+```{r}
+# Save all essential components in one bundle
+save(list = c(
+  "models",          # LASSO models
+  "eval_results",    # Model performance metrics
+  "predict_trials",  # Main prediction function
+  "splits"          # Data splits
+), file = "../prediction_modelling/prediction_bundle.RData")
+```
+
+
 
 

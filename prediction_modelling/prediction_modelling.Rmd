@@ -253,38 +253,46 @@ We built independent models that don't account for interactions between country/
 Each model makes predictions assuming other factors are not involved. Therefore, consider only the single prediction function.
 
 ```{r}
-# Single prediction function for dashboard use
 predict_trials <- function(year, type, category) {
   # Input validation
-  if(!type %in% c("disease", "country", "phase")) {
-    stop("Type must be one of: disease, country, phase")
+  if(!type %in% c("country", "disease", "phase")) {
+    stop("Type must be one of: country, disease, phase")
   }
   
-  # Create new data frame
-  new_data <- data.frame(
-    year = year,
-    trial_count = NA
-  )
+  # Get training data first
+  train_data <- splits[[type]]$train
   
-  # Add category based on type
-  if(type == "disease") {
-    new_data$disease <- category
-    train_data <- splits$disease$train
-  } else if(type == "country") {
-    new_data$country <- category
-    train_data <- splits$country$train
+  # Create new data frame based on type
+  if(type == "country") {
+    # Get all unique countries from training data
+    all_countries <- unique(train_data$country)
+    new_data <- data.frame(
+      year = year,
+      country = factor(category, levels = all_countries),
+      trial_count = NA
+    )
+    
+  } else if(type == "disease") {
+    all_diseases <- unique(train_data$disease)
+    new_data <- data.frame(
+      year = year,
+      disease = factor(category, levels = all_diseases),
+      trial_count = NA
+    )
+    
   } else if(type == "phase") {
-    new_data$phase <- category
-    train_data <- splits$phase$train
+    all_phases <- unique(train_data$phase)
+    new_data <- data.frame(
+      year = year,
+      phase = factor(category, levels = all_phases),
+      trial_count = NA
+    )
   }
 
   # Create model matrix
-  combined_data <- rbind(train_data, new_data)
-  X_new <- model.matrix(trial_count ~ ., data = combined_data)
-  # Extract just the last row which corresponds to our new data
-  X_new <- X_new[nrow(X_new), , drop = FALSE]
+  X_new <- model.matrix(~ ., data = new_data[-3])  # exclude trial_count column
   
-  # Make prediction using lasso_model from the models list
+  # Make prediction
   prediction <- predict.glmnet(models[[type]]$lasso_model, 
                              newx = X_new,
                              s = models[[type]]$best_lambda)
@@ -293,21 +301,25 @@ predict_trials <- function(year, type, category) {
 }
 ```
 
+
 ```{r}
-# Example usage
+# Test country predictions
+cat("\nCountry predictions:\n")
+cat("United.States:", predict_trials(2025, "country", "United.States"), "\n")
+cat("China:", predict_trials(2025, "country", "China"), "\n")
 
-# Disease prediction
-anxiety_pred <- predict_trials(2025, "disease", "Anxiety")
-cat("Predicted trials for Anxiety:", anxiety_pred, "\n")
+# Test disease predictions
+cat("\nDisease predictions:\n")
+cat("Cancer:", predict_trials(2025, "disease", "Cancer"), "\n")
+cat("Depression:", predict_trials(2025, "disease", "Depression"), "\n")
 
-# Country prediction
-us_pred <- predict_trials(2025, "country", "United.States")
-cat("Predicted trials in United States:", us_pred, "\n")
-
-# Phase prediction
-phase1_pred <- predict_trials(2025, "phase", "PHASE1")
-cat("Predicted Phase 1 trials:", phase1_pred, "\n")
+# Test phase predictions
+cat("Phase predictions:\n")
+cat("PHASE1:", predict_trials(2025, "phase", "PHASE1"), "\n")
+cat("PHASE2:", predict_trials(2025, "phase", "PHASE2"), "\n")
+cat("PHASE3:", predict_trials(2025, "phase", "PHASE3"), "\n")
 ```
+
 ### Documentation
 
 ```{r}
@@ -319,7 +331,3 @@ save(list = c(
   "splits"          # Data splits
 ), file = "../prediction_modelling/prediction_bundle.RData")
 ```
-
-
-
-

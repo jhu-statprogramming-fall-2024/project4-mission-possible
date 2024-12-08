@@ -1,0 +1,266 @@
+## ----message=FALSE, warning=FALSE------------------------------------------------------------------------
+library(doParallel)
+library(tidyverse)
+library(glmnet)
+
+
+## --------------------------------------------------------------------------------------------------------
+load_data <- function(file_path = "data.csv") {
+  # Read data
+  data <- as.data.frame(read.csv(file_path))
+  
+  # Basic data info
+  cat("Loaded data dimensions:", nrow(data), "rows and", ncol(data), "columns\n")
+  
+  return(data)
+}
+
+data <- load_data("ori_data.csv")
+
+
+## --------------------------------------------------------------------------------------------------------
+process_data <- function(data) {
+  # 1. Country data in long format from wide
+  country_data <- data %>%
+    select(year, United.States, Canada, China, France, Germany,
+           United.Kingdom, Korea..Republic.of, Italy, Spain, Turkey) %>%
+    pivot_longer(cols = -year, 
+                names_to = "country", 
+                values_to = "trial_count") %>%
+    group_by(year, country) %>%
+    summarise(trial_count = sum(trial_count), .groups = "drop")
+  
+  # 2. Disease data in long format  
+  disease_data <- data %>%
+    select(year, Breast.Cancer, Prostate.Cancer, Stroke, Heart.Failure,
+           Pain, Obesity, Cancer, Depression, Hypertension, Anxiety) %>%
+    pivot_longer(cols = -year, 
+                names_to = "disease", 
+                values_to = "trial_count") %>%
+    group_by(year, disease) %>%
+    summarise(trial_count = sum(trial_count), .groups = "drop")
+  
+  # 3. Phase data (already in correct format)
+  phase_data <- data %>%
+    select(year, phase) %>%
+     mutate(phase = if_else(is.na(phase), "NA", as.character(phase))) %>%  # Convert NA to "NA" string
+    group_by(year, phase) %>%
+    summarise(trial_count = n(), .groups = "drop")
+  
+  return(list(
+    country = country_data,
+    disease = disease_data,
+    phase = phase_data
+  ))
+}
+
+processed_data <- process_data(data)
+
+
+## --------------------------------------------------------------------------------------------------------
+split_data <- function(data, train_ratio = 0.8) {
+  set.seed(123) 
+  
+  if ("country" %in% names(data)) {
+    # Stratified split by country
+    train_idx <- unlist(lapply(unique(data$country), function(c) {
+      idx <- which(data$country == c)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if ("disease" %in% names(data)) {
+    # Stratified split by disease
+    train_idx <- unlist(lapply(unique(data$disease), function(d) {
+      idx <- which(data$disease == d)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  } else if ("phase" %in% names(data)) {
+    # Stratified split by phase
+    train_idx <- unlist(lapply(unique(data$phase), function(p) {
+      idx <- which(data$phase == p)
+      sample(idx, size = floor(train_ratio * length(idx)))
+    }))
+  }
+  
+  # Create train and test sets
+  list(
+    train = data[train_idx, ],
+    test = data[-train_idx, ]
+  )
+}
+
+# Split each dataset using the modified function
+splits <- list(
+  country = split_data(processed_data$country),
+  disease = split_data(processed_data$disease),
+  phase = split_data(processed_data$phase)
+)
+
+
+## --------------------------------------------------------------------------------------------------------
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+
+## --------------------------------------------------------------------------------------------------------
+train_lasso <- function(train_data) {
+  # Create model matrix
+  X_train <- model.matrix(trial_count ~ ., data = train_data)
+  y_train <- train_data$trial_count
+  
+  # Perform cross-validation to find optimal lambda
+  cv_fit <- cv.glmnet(
+    x = X_train,
+    y = y_train,
+    alpha = 1,
+    nfolds = 5,
+    parallel = TRUE
+  )
+  
+  # Get best lambda and fit final model
+  best_lambda <- cv_fit$lambda.min
+  final_model <- glmnet(X_train, y_train, alpha = 1, lambda = best_lambda)
+  
+  list(
+    lasso_model = final_model,
+    cv_fit = cv_fit,
+    best_lambda = best_lambda
+  )
+}
+
+# Train models
+models <- list(
+  country = train_lasso(splits$country$train),
+  disease = train_lasso(splits$disease$train),
+  phase = train_lasso(splits$phase$train)
+)
+
+# Stop parallel processing
+stopCluster(cl)
+
+
+## --------------------------------------------------------------------------------------------------------
+evaluate_lasso <- function(model_list, test_data) {
+  # Extract model components
+  model <- model_list$lasso_model
+  best_lambda <- model_list$best_lambda
+  
+  # Create test matrix in the same way as training
+  X_test <- model.matrix(trial_count ~ ., data = test_data)
+  y_test <- test_data$trial_count
+  
+  # Make predictions
+  predictions <- predict.glmnet(model, newx = X_test, s = best_lambda)
+  
+  
+  # Calculate metrics
+  mse <- mean((y_test - predictions)^2)
+  rmse <- sqrt(mse)
+  mae <- mean(abs(y_test - predictions))
+  r2 <- cor(y_test, predictions)^2
+  
+  list(
+    mse = mse,
+    rmse = rmse,
+    mae = mae,
+    r2 = r2
+  )
+}
+
+# Evaluate models
+eval_results <- list(
+  country = evaluate_lasso(models$country, splits$country$test),
+  disease = evaluate_lasso(models$disease, splits$disease$test),
+  phase = evaluate_lasso(models$phase, splits$phase$test)
+)
+
+# Print results for each model
+for (type in names(eval_results)) {
+  cat("\nResults for", type, "model:\n")
+  cat("Best lambda:", models[[type]]$best_lambda, "\n")
+  cat("Test RMSE:", eval_results[[type]]$rmse, "\n")
+  cat("Test MAE:", eval_results[[type]]$mae, "\n")
+  cat("Test R-squared:", eval_results[[type]]$r2, "\n")
+  
+  # Print non-zero coefficients
+  coefficients <- coef(models[[type]]$lasso_model, s = models[[type]]$best_lambda)
+  coef_df <- data.frame(
+    variable = rownames(coefficients)[coefficients@i + 1],
+    coefficient = coefficients@x,
+    row.names = NULL
+  )
+  
+  cat("\nSelected variables and coefficients:\n")
+  print(coef_df)
+}
+
+
+## --------------------------------------------------------------------------------------------------------
+predict_trials <- function(year, type, category) {
+  # Input validation
+  if(!type %in% c("country", "disease", "phase")) {
+    stop("Type must be one of: country, disease, phase")
+  }
+  
+  # Get training data first
+  train_data <- splits[[type]]$train
+  
+  # Create new data frame based on type
+  if(type == "country") {
+    # Get all unique countries from training data
+    all_countries <- unique(train_data$country)
+    new_data <- data.frame(
+      year = year,
+      country = factor(category, levels = all_countries),
+      trial_count = NA
+    )
+    
+  } else if(type == "disease") {
+    all_diseases <- unique(train_data$disease)
+    new_data <- data.frame(
+      year = year,
+      disease = factor(category, levels = all_diseases),
+      trial_count = NA
+    )
+    
+  } else if(type == "phase") {
+    all_phases <- unique(train_data$phase)
+    new_data <- data.frame(
+      year = year,
+      phase = factor(category, levels = all_phases),
+      trial_count = NA
+    )
+  }
+
+  # Create model matrix
+  X_new <- model.matrix(~ ., data = new_data[-3])  # exclude trial_count column
+  
+  # Make prediction
+  prediction <- predict.glmnet(models[[type]]$lasso_model, 
+                             newx = X_new,
+                             s = models[[type]]$best_lambda)
+  
+  return(round(as.numeric(prediction)))
+}
+
+
+## --------------------------------------------------------------------------------------------------------
+# Test country predictions
+cat("\nCountry predictions:\n")
+cat("United.States:", predict_trials(2025, "country", "United.States"), "\n")
+cat("China:", predict_trials(2025, "country", "China"), "\n")
+
+# Test disease predictions
+cat("\nDisease predictions:\n")
+cat("Cancer:", predict_trials(2025, "disease", "Cancer"), "\n")
+cat("Depression:", predict_trials(2025, "disease", "Depression"), "\n")
+
+# Test phase predictions
+cat("Phase predictions:\n")
+cat("PHASE1:", predict_trials(2025, "phase", "PHASE1"), "\n")
+cat("PHASE2:", predict_trials(2025, "phase", "PHASE2"), "\n")
+cat("PHASE3:", predict_trials(2025, "phase", "PHASE3"), "\n")
+
+
+
+

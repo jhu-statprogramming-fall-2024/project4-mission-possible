@@ -1,0 +1,298 @@
+---
+title: "Clinical Trials Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    theme: flatly
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+library(doParallel)
+library(tidyverse)
+library(glmnet)
+#knitr::purl("prediction_modelling.Rmd", output = "prediction_modelling.R")
+source("prediction_modelling.R")
+#load("prediction_bundle.RData")
+```
+
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(dplyr)
+
+descriptive <- read.csv("data.csv")
+
+# Convert 'year' to numeric
+descriptive$year <- as.numeric(descriptive$year)
+
+```
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+### Description
+```{r}
+# Category selection
+selectInput(
+  inputId = "category", 
+  label = "Select Category", 
+  choices = c("Disease" = "disease", 
+              "Phase" = "phase", 
+              "Country" = "country")
+)
+# Dynamic dropdown menu for specific selection
+uiOutput("dynamic_selector")
+
+```
+
+```{r}
+# Dynamic dropdown menu for specific selection
+output$dynamic_selector <- renderUI({
+  if (input$category == "disease") {
+    selectInput("selected_var", "Select Disease Label", 
+                choices = c("BreastCancer", "ProstateCancer", "Stroke", 
+                            "HeartFailure", "Pain", "Obesity", "Cancer", 
+                            "Depression", "Hypertension", "Anxiety"))
+  } else if (input$category == "phase") {
+    selectInput("selected_var", "Select Research Phase", 
+                choices = unique(na.omit(descriptive$phase)))
+  } else if (input$category == "country") {
+    selectInput("selected_var", "Select Country", 
+                choices = c("UnitedStates", "Canada", "China", "France", 
+                            "Germany", "UnitedKingdom", "Korea", 
+                            "Italy", "Spain", "Turkey"))
+  }
+})
+
+```
+
+### Trial Count Over Time
+```{r}
+
+renderPlot({
+  req(input$selected_var)  # Ensure a value is selected
+  
+  # Filter and summarize data
+  filtered_data <- descriptive %>%
+    filter(year >= 2015 & year <= 2024) %>%
+    filter({
+      if (input$category == "disease") {
+        .data[[input$selected_var]] == 1  # Safe reference for disease
+      } else if (input$category == "phase") {
+        phase == input$selected_var  # Match phase
+      } else if (input$category == "country") {
+        .data[[input$selected_var]] == 1  # Safe reference for country
+      }
+    }) %>%
+    group_by(year, category = input$category) %>%
+    summarise(count = n(), .groups = "drop")  # Count rows for each year and category
+  
+  # Check if data exists
+  if (nrow(filtered_data) == 0) {
+    showNotification("No data available for the selected option.", type = "warning")
+    return(NULL)
+  }
+  
+  # Generate the line chart with different colors for categories
+  ggplot(filtered_data, aes(x = year, y = count, color = category)) +
+    geom_line(size = 1.2) +
+    geom_point(size = 2) +
+    scale_x_continuous(
+      breaks = seq(2015, 2024, by = 1),  # X-axis: 2015 to 2024 as integers
+      limits = c(2015, 2024)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 850),  # Y-axis: Range from 0 to 1000
+      breaks = seq(0, 850, by = 200)
+    ) +
+    scale_color_manual(
+      values = c("disease" = "red", "phase" = "green", "country" = "blue"),
+      labels = c("Disease", "Phase", "Country")
+    ) +
+    labs(
+      title = paste("Trial Count for", input$selected_var),
+      x = "Year", 
+      y = "Total Count",
+      color = "Category"
+    ) +
+    theme_minimal()
+})
+
+
+```
+Column {data-width=300}
+-----------------------------------------------------------------------
+### Prediction Panel 
+```{r}
+# Fixed inputs for prediction
+selectInput(
+  inputId = "prediction_category", 
+  label = "Select Category",
+  choices = c("country" = "country", 
+              "disease" = "disease", 
+              "phase" = "phase")
+)
+
+uiOutput("prediction_selector")  # Dynamically generated options
+
+
+```
+
+### Year Selection
+```{r}
+# Fixed year selection
+selectInput(
+  inputId = "prediction_year",
+  label = "Select Year for Prediction",
+  choices = as.character(2025:2035),  # Years from 2025 to 2035
+  selected = "2025"
+)
+
+# Action button to trigger prediction
+actionButton("predict_btn", "Predict Trials")
+
+
+```
+
+
+### Prediction Results
+```{r}
+
+# Display prediction output and model information
+verbatimTextOutput("prediction_result")  
+verbatimTextOutput("model_info")    
+
+```
+
+
+```{r}
+# Dynamically generate options based on category
+output$prediction_selector <- renderUI({
+  req(input$prediction_category)
+  
+  if (input$prediction_category == "country") {
+    selectInput("prediction_value", "Select Country",
+                choices = c("United.States", "Canada", "China", "France", 
+                            "Germany", "United.Kingdom", "Korea..Republic.of", 
+                            "Italy", "Spain", "Turkey"))
+  } else if (input$prediction_category == "disease") {
+    selectInput("prediction_value", "Select Disease",
+                choices = c("Breast.Cancer", "Prostate.Cancer", "Stroke", 
+                            "Heart.Failure", "Pain", "Obesity", "Cancer", 
+                            "Depression", "Hypertension", "Anxiety"))
+  } else if (input$prediction_category == "phase") {
+    selectInput("prediction_value", "Select Phase",
+                choices = c("PHASE1", "PHASE2", "PHASE3"))
+  }
+})
+
+
+```
+
+
+```{r}
+
+# Observe and trigger prediction
+observeEvent(input$predict_btn, {
+  req(input$prediction_category, input$prediction_value, input$prediction_year)
+  
+  # Call prediction function
+  predicted_trials <- predict_trials(
+    as.numeric(input$prediction_year), 
+    input$prediction_category, 
+    input$prediction_value
+  )
+  eval_metrics <- eval_results[[input$prediction_category]]
+  
+  # Display prediction result
+  output$prediction_result <- renderText({
+    paste("Predicted Trial Count for", 
+          input$prediction_value, "in", input$prediction_year, ":", predicted_trials, "\n","\n","\n",
+          "Model Information for", input$prediction_category, ":\n",
+          "Best lambda:", models[[input$prediction_category]]$best_lambda, "\n",
+          "Test RMSE:", eval_metrics$rmse, "\n",
+          "Test MAE:", eval_metrics$mae, "\n",
+          "Test R-squared:", eval_metrics$r2, "\n")
+  })
+
+})
+
+```
+
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+### Filtered Records {.tabset}
+```{r}
+
+library(DT)  # Interactive data tables
+
+# Sidebar controls: Year, Disease, and Country
+selectInput(
+  inputId = "filter_year", 
+  label = "Select Year",
+  choices = c("All", unique(descriptive$year)), 
+  selected = "All"
+)
+
+selectInput(
+  inputId = "filter_disease", 
+  label = "Select Disease Type",
+  choices = c("All", "BreastCancer", "ProstateCancer", "Stroke", 
+              "HeartFailure", "Pain", "Obesity", "Cancer", 
+              "Depression", "Hypertension", "Anxiety"),
+  selected = "All"
+)
+
+selectInput(
+  inputId = "filter_country", 
+  label = "Select Country",
+  choices = c("All", "UnitedStates", "Canada", "China", "France", 
+              "Germany", "UnitedKingdom", "Korea", "Italy", "Spain", "Turkey"),
+  selected = "All"
+)
+
+# Main display: DataTable
+DT::dataTableOutput("filtered_table")
+
+```
+
+
+```{r}
+
+output$filtered_table <- DT::renderDataTable({
+  # Replace NA with "NA" for display
+  filtered_data <- descriptive %>%
+    mutate(across(everything(), ~ifelse(is.na(.), "NA", .)))  # Replace NA with "NA"
+
+  # Apply filters dynamically
+  if (input$filter_year != "All") {
+    filtered_data <- filtered_data %>%
+      filter(year == as.numeric(input$filter_year))
+  }
+  
+  if (input$filter_disease != "All") {
+    filtered_data <- filtered_data %>%
+      filter(.data[[input$filter_disease]] == 1)  # Filter disease columns
+  }
+  
+  if (input$filter_country != "All") {
+    filtered_data <- filtered_data %>%
+      filter(.data[[input$filter_country]] == 1)  # Filter country columns
+  }
+  
+  # Render the filtered table
+  DT::datatable(
+    filtered_data,
+    options = list(pageLength = 10, autoWidth = TRUE),
+    rownames = FALSE
+  )
+})
+
+
+```
+
+
+

@@ -1,0 +1,12 @@
+name: Dashboard
+title: Dashboard
+username: wangcan20
+account: wangcan20
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 13550597
+bundleId: 9482129
+url: https://wangcan20.shinyapps.io/Dashboard/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

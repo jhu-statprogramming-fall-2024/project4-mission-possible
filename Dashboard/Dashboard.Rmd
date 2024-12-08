@@ -12,9 +12,10 @@ library(doParallel)
 library(tidyverse)
 library(glmnet)
 #knitr::purl("prediction_modelling.Rmd", output = "prediction_modelling.R")
-source("prediction_modelling.R")
-#load("prediction_bundle.RData")
+#source("prediction_modelling.R")
+load("prediction_bundle.RData")
 ```
+
 
 
 ```{r}
@@ -122,9 +123,12 @@ renderPlot({
 
 
 ```
+
 Column {data-width=300}
 -----------------------------------------------------------------------
 ### Prediction Panel 
+
+
 ```{r}
 # Fixed inputs for prediction
 selectInput(
@@ -293,6 +297,4 @@ output$filtered_table <- DT::renderDataTable({
 
 
 ```
-
-
 

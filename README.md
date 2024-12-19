@@ -3,6 +3,7 @@
 ## Overview
 
 Team: Mission Possible
+
 Team member: Can Wang, Xiao Wu, Xindi Shan
 
 This project investigates trends in the number of clinical trials conducted across different countries, disease types, and phases, and examines how these trends evolve over time. The goal is to leverage clinical trial data to develop a comprehensive dashboard for visualizing and analyzing these trends dynamically. The depolyed dashboard could be found at https://wangcan20.shinyapps.io/Dashboard/
